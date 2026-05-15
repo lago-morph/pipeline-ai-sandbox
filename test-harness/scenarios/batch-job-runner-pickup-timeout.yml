@@ -1,0 +1,22 @@
+scenario_id: batch-job-runner-pickup-timeout
+archetype: python-gha-with-agents-md
+skill_under_test: batch-job
+target: synthetic-fixture
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+    expected:
+      issue_number_present: true
+
+  - name: invoke
+    inputs:
+      command: nonexistent-command
+      poll_timeout_s: 5
+    expected:
+      batch_job_comment_present: true
+
+  - name: verify
+    expected:
+      envelope_run_status: error
+      error_kind: pickup_timeout

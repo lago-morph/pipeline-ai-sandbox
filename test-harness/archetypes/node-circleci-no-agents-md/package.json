@@ -1,0 +1,9 @@
+{
+  "name": "node-circleci-fixture",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Fixture repo for the test-harness skill.",
+  "scripts": {
+    "test": "echo \"no tests yet\" && exit 0"
+  }
+}

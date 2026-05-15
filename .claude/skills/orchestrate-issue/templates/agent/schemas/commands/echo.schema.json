@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/commands/echo.schema.json",
+  "title": "echo",
+  "description": "Schema for the echo command: trivial demonstration command that returns its args.",
+  "type": "object",
+  "required": ["args", "summary_completed", "summary_error"],
+  "properties": {
+    "args": {
+      "type": "object",
+      "properties": {
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "summary_completed": {
+      "type": "object",
+      "required": ["echoed_args", "message"],
+      "properties": {
+        "echoed_args": { "type": "object" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "summary_error": {
+      "type": "object",
+      "required": ["error_kind", "error_detail"],
+      "properties": {
+        "error_kind": { "type": "string" },
+        "error_detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

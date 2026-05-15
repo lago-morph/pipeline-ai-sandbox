@@ -1,0 +1,15 @@
+{
+  "name": "blank-repo",
+  "description": "Empty repo; no AGENTS.md, no CI, only a placeholder README. Used to test onboarding on a clean slate.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "none",
+    "language": "unknown",
+    "protocol_installed": false,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md"
+  ]
+}

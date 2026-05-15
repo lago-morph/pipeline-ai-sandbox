@@ -1,0 +1,25 @@
+scenario_id: batch-job-branch-sha-mismatch
+archetype: python-gha-with-agents-md
+skill_under_test: batch-job
+target: synthetic-fixture
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      create_branch: true
+    expected:
+      issue_number_present: true
+      branch_created: true
+
+  - name: invoke
+    inputs:
+      command: echo
+      args: {message: "stale"}
+      commit_sha: "0000000000000000000000000000000000000000"
+    expected:
+      batch_job_comment_present: true
+
+  - name: verify
+    expected:
+      envelope_run_status: error
+      error_kind: sha_mismatch

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/commands/run-tests.schema.json",
+  "title": "run-tests",
+  "description": "Schema for the run-tests command: validates args and the produced summary.",
+  "type": "object",
+  "required": ["args", "summary_completed", "summary_error"],
+  "properties": {
+    "args": {
+      "type": "object",
+      "required": ["suite"],
+      "properties": {
+        "suite": { "enum": ["unit", "integration", "e2e"] },
+        "shard": { "type": "integer", "minimum": 0 },
+        "filter": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "summary_completed": {
+      "type": "object",
+      "required": ["passed", "failed", "skipped", "duration_seconds"],
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "duration_seconds": { "type": "number", "minimum": 0 },
+        "failed_tests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "message": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "summary_error": {
+      "type": "object",
+      "required": ["error_kind", "error_detail"],
+      "properties": {
+        "error_kind": { "type": "string" },
+        "error_detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

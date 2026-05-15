@@ -1,0 +1,8 @@
+[project]
+name = "python-gha-fixture"
+version = "0.0.1"
+description = "Fixture repo for the test-harness skill."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

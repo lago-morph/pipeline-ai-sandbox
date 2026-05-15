@@ -1,0 +1,33 @@
+scenario_id: orchestrate-issue-single-subagent
+archetype: python-gha-with-agents-md
+skill_under_test: orchestrate-issue
+target: live-new-repo
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      issue_body: "instructions_inline: add a single trivial change"
+    expected:
+      issue_number_present: true
+
+  - name: claim
+    inputs:
+      agent_id: "orchestrate-single-agent"
+    expected:
+      issue_locked: true
+
+  - name: fanout
+    inputs:
+      max_parallel: 1
+    expected:
+      subagents_dispatched: 1
+
+  - name: merge
+    expected:
+      feature_branch_advanced: true
+      pr_opened: true
+
+  - name: verify
+    expected:
+      pr_merged: true
+      meta_status: shipped

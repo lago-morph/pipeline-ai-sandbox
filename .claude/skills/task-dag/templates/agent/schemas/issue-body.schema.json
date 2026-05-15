@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/issue-body.schema.json",
+  "title": "agent-meta block (issue body)",
+  "description": "Schema for the JSON object inside an issue body's fenced ```agent-meta block.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "agent_id",
+    "session_id",
+    "status",
+    "status_ts",
+    "feature_branch",
+    "base_branch",
+    "parent_issue",
+    "depends_on_prs",
+    "instructions_path",
+    "instructions_inline",
+    "created_at"
+  ],
+  "properties": {
+    "protocol_version": { "type": "integer", "const": 1 },
+    "agent_id": { "type": ["string", "null"] },
+    "session_id": { "type": ["string", "null"] },
+    "status": {
+      "type": ["string", "null"],
+      "enum": [null, "working", "abandoned", "finished"]
+    },
+    "status_ts": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "feature_branch": { "type": "string", "minLength": 1 },
+    "base_branch": { "type": "string", "minLength": 1 },
+    "parent_issue": { "type": ["integer", "null"], "minimum": 1 },
+    "depends_on_prs": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "instructions_path": { "type": ["string", "null"] },
+    "instructions_inline": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "anyOf": [
+    { "properties": { "instructions_inline": { "type": "string", "minLength": 1 } }, "required": ["instructions_inline"] },
+    { "properties": { "instructions_path": { "type": "string", "minLength": 1 } }, "required": ["instructions_path"] }
+  ],
+  "additionalProperties": true
+}

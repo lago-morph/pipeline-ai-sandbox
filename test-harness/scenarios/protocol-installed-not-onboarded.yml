@@ -1,0 +1,36 @@
+scenario_id: protocol-installed-not-onboarded
+archetype: protocol-installed-not-onboarded
+skill_under_test: onboarding
+target: live-new-repo
+phases:
+  - name: detect
+    expected:
+      protocol_installed: true
+      onboarding_started: false
+      installed_but_not_onboarded: true
+
+  - name: interview
+    inputs:
+      scripted_answers:
+        intent: "complete the onboarding for an already-installed protocol"
+        adoption: "full"
+    expected:
+      dialog_file_present: true
+      questions_answered_min: 12
+
+  - name: recommend
+    expected:
+      recommendations_file_present: true
+      install_step_skipped: true
+
+  - name: apply
+    inputs:
+      approve_all: true
+    expected:
+      pointer_added_to_agents_md: false
+      onboarding_marker_set: true
+
+  - name: verify
+    expected:
+      meta_status: onboarded
+      protocol_install_unchanged: true

@@ -1,0 +1,27 @@
+scenario_id: task-dag-claim-and-plan
+archetype: python-gha-with-agents-md
+skill_under_test: task-dag
+target: live-new-repo
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      issue_body: "instructions_inline: write a hello world test"
+    expected:
+      issue_number_present: true
+
+  - name: claim
+    inputs:
+      agent_id: "harness-agent-claim"
+    expected:
+      issue_locked: true
+      issue_has_label: agent-task-claimed
+
+  - name: plan
+    expected:
+      brief_present: true
+      subagent_plan_count_min: 1
+
+  - name: verify
+    expected:
+      meta_status: planned

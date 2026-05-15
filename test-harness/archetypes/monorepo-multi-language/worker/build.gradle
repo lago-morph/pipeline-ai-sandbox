@@ -1,0 +1,7 @@
+// placeholder build.gradle for the worker sub-project
+plugins {
+    id 'java'
+}
+
+group = 'example'
+version = '0.0.1'

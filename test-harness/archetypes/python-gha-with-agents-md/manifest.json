@@ -1,0 +1,20 @@
+{
+  "name": "python-gha-with-agents-md",
+  "description": "Python project with AGENTS.md, CLAUDE.md, and a minimal GitHub Actions pytest workflow. The ideal adoption target.",
+  "expected_discovery": {
+    "agents_md_present": true,
+    "claude_md_present": true,
+    "ci_system": "github-actions",
+    "language": "python",
+    "protocol_installed": false,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".github/workflows/ci.yml",
+    "pyproject.toml",
+    "tests/__init__.py"
+  ]
+}

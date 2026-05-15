@@ -1,0 +1,16 @@
+{
+  "name": "existing-skills-conflict",
+  "description": "Repo with a deliberately older/conflicting .claude/skills/batch-job/ directory. Tests conflict resolution in skill self-install.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "none",
+    "language": "unknown",
+    "protocol_installed": false,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    ".claude/skills/batch-job/SKILL.md"
+  ]
+}

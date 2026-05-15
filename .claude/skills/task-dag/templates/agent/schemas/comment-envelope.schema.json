@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/comment-envelope.schema.json",
+  "title": "comment envelope (batch-job-request)",
+  "description": "Lifecycle-aware schema for comment-body envelopes. Supports request, post-run, and parse_error shapes.",
+  "type": "object",
+  "required": ["protocol_version", "kind"],
+  "properties": {
+    "protocol_version": { "type": "integer", "const": 1 },
+    "kind": { "type": "string", "const": "batch-job-request" },
+    "command": { "type": "string", "minLength": 1 },
+    "args": { "type": "object" },
+    "branch": { "type": "string", "minLength": 1 },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "subagent_id": { "type": "string", "minLength": 1 },
+    "submitted_at": { "type": "string", "format": "date-time" },
+
+    "run_status": {
+      "type": ["string", "null"],
+      "enum": [null, "running", "completed", "error", "parse_error"]
+    },
+    "run_started_at": { "type": ["string", "null"], "format": "date-time" },
+    "run_finished_at": { "type": ["string", "null"], "format": "date-time" },
+    "workflow_run_id": { "type": ["integer", "null"] },
+    "checked_out_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "summary": { "type": ["object", "null"] },
+    "log_manifest_branch": { "type": ["string", "null"] },
+    "log_manifest_path": { "type": ["string", "null"] },
+
+    "agent_ack": {
+      "type": ["string", "null"],
+      "enum": [null, "finished"]
+    },
+    "agent_acked_at": { "type": ["string", "null"], "format": "date-time" },
+
+    "error_kind": { "type": ["string", "null"] },
+    "error_detail": { "type": ["string", "null"] },
+    "original_body_b64": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    {
+      "description": "If run_status is null/running/completed/error (i.e. a real request was submitted), the request fields must be present.",
+      "if": {
+        "properties": {
+          "run_status": { "enum": [null, "running", "completed", "error"] }
+        }
+      },
+      "then": {
+        "required": ["command", "args", "branch", "commit_sha", "subagent_id", "submitted_at"]
+      }
+    },
+    {
+      "description": "If run_status is 'completed', summary and log manifest fields are required.",
+      "if": {
+        "properties": { "run_status": { "const": "completed" } },
+        "required": ["run_status"]
+      },
+      "then": {
+        "required": [
+          "run_status",
+          "run_started_at",
+          "run_finished_at",
+          "workflow_run_id",
+          "checked_out_sha",
+          "summary",
+          "log_manifest_branch",
+          "log_manifest_path"
+        ]
+      }
+    },
+    {
+      "description": "If run_status is 'error', error_kind and run timing must be present.",
+      "if": {
+        "properties": { "run_status": { "const": "error" } },
+        "required": ["run_status"]
+      },
+      "then": {
+        "required": [
+          "run_status",
+          "run_started_at",
+          "run_finished_at",
+          "workflow_run_id",
+          "error_kind"
+        ]
+      }
+    },
+    {
+      "description": "If run_status is 'parse_error', original_body_b64 and error_kind must be present.",
+      "if": {
+        "properties": { "run_status": { "const": "parse_error" } },
+        "required": ["run_status"]
+      },
+      "then": {
+        "required": [
+          "run_status",
+          "error_kind",
+          "original_body_b64",
+          "run_started_at",
+          "run_finished_at",
+          "workflow_run_id"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": true
+}

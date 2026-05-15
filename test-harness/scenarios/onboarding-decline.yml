@@ -1,0 +1,23 @@
+scenario_id: onboarding-decline
+archetype: blank-repo
+skill_under_test: onboarding
+target: synthetic-fixture
+phases:
+  - name: detect
+    expected:
+      protocol_installed: false
+      onboarding_started: false
+
+  - name: interview
+    inputs:
+      scripted_answers:
+        decline: true
+    expected:
+      decline_acknowledged: true
+
+  - name: verify
+    expected:
+      dialog_file_present: false
+      recommendations_file_present: false
+      agents_md_present: false
+      no_state_written: true

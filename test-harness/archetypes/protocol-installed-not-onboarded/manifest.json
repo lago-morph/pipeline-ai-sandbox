@@ -1,0 +1,18 @@
+{
+  "name": "protocol-installed-not-onboarded",
+  "description": "Full protocol install (.agent/config.json + workflow handler) but no onboarding dialog file. Tests the 'installed but not onboarded' detection.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "github-actions",
+    "language": "python",
+    "protocol_installed": true,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    ".agent/config.json",
+    ".github/workflows/batch-job-handler.yml",
+    "tests/__init__.py"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/commands/bad-summary.schema.json",
+  "title": "bad-summary",
+  "description": "Test command whose handler intentionally returns an invalid summary so the handler's summary_schema_violation path is exercised.",
+  "type": "object",
+  "required": ["args", "summary_completed", "summary_error"],
+  "properties": {
+    "args": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "summary_completed": {
+      "type": "object",
+      "required": ["required_field"],
+      "properties": {
+        "required_field": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "summary_error": {
+      "type": "object",
+      "required": ["error_kind", "error_detail"],
+      "properties": {
+        "error_kind": { "type": "string" },
+        "error_detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

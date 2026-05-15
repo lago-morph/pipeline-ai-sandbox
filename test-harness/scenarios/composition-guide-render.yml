@@ -1,0 +1,21 @@
+scenario_id: composition-guide-render
+archetype: blank-repo
+skill_under_test: composition-guide
+target: synthetic-fixture
+phases:
+  - name: render
+    inputs:
+      source: .claude/skills/composition-guide/SKILL.md
+    expected:
+      markdown_renders: true
+      frontmatter_parses: true
+
+  - name: lint
+    expected:
+      no_broken_internal_links: true
+      no_broken_external_links: true
+      all_referenced_skills_exist:
+        - batch-job
+        - task-dag
+        - orchestrate-issue
+        - onboarding

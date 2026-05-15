@@ -1,0 +1,32 @@
+scenario_id: onboarding-resume-mid-interview
+archetype: blank-repo
+skill_under_test: onboarding
+target: synthetic-fixture
+phases:
+  - name: setup
+    inputs:
+      preexisting_dialog_questions_answered: 13
+    expected:
+      dialog_file_present: true
+      questions_answered: 13
+
+  - name: detect
+    expected:
+      onboarding_started: true
+      resume_point_index: 14
+
+  - name: interview
+    inputs:
+      mode: resume
+      scripted_answers_from: 14
+    expected:
+      questions_answered: 22
+      no_questions_re_asked: true
+
+  - name: recommend
+    expected:
+      recommendations_file_present: true
+
+  - name: verify
+    expected:
+      meta_status: onboarded

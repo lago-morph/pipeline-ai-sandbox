@@ -1,0 +1,72 @@
+# Canonical interview question tree for the onboarding skill.
+#
+# Stable schema. Question IDs do not change across versions. New
+# questions append to a category; renames or removals require bumping
+# `version`. Partial dialog files remain resumable across additive
+# schema changes.
+version: 1
+categories:
+  - id: intent
+    title: "Statement of intent"
+    questions:
+      - id: intent.purpose
+        text: "What does this repo do, in one sentence?"
+        type: free_text
+      - id: intent.audience
+        text: "Who works on it (humans only / agents only / both)?"
+        type: choice
+        choices: ["humans only", "agents only", "both"]
+      - id: intent.goal
+        text: "What is the goal for the next 1-3 months?"
+        type: free_text
+  - id: problems
+    title: "Problems to solve"
+    questions:
+      - id: problems.friction
+        text: "What current friction do you want the protocol to address?"
+        type: multi_choice
+        choices: ["subagent coordination", "secrets handling", "parallel fanout", "long-running jobs", "other"]
+      - id: problems.freeform
+        text: "Any existing pain points to capture?"
+        type: free_text
+  - id: current_workflow
+    title: "Current workflow playback"
+    questions:
+      - id: current_workflow.summary_accurate
+        text: "Based on what we found, your current workflow looks like ... Is this accurate?"
+        type: yes_no_revise
+      - id: current_workflow.revisions
+        text: "If not accurate, what should we revise in the summary?"
+        type: free_text
+  - id: integration
+    title: "Integration preferences"
+    questions:
+      - id: integration.depth
+        text: "Adoption depth?"
+        type: choice
+        choices: ["full", "partial (batch-job only)", "spec-only"]
+      - id: integration.branch_naming
+        text: "Branch naming overrides? (default agent/<issue>-<slug>)"
+        type: free_text
+      - id: integration.commands
+        text: "Which commands to enable at start?"
+        type: multi_choice
+        choices: ["run-tests", "build", "deploy-staging", "echo"]
+      - id: integration.fanout
+        text: "Enable orchestrate-issue for parallel work?"
+        type: yes_no
+  - id: sensitive_files
+    title: "Sensitive files"
+    questions:
+      - id: sensitive_files.list
+        text: "Are there docs that should not be modified (besides AGENTS.md/CLAUDE.md)?"
+        type: free_text
+      - id: sensitive_files.confirm_added
+        text: "Confirm the do-not-edit list above is complete?"
+        type: yes_no_revise
+  - id: confirmation
+    title: "Confirmation"
+    questions:
+      - id: confirmation.recap_ok
+        text: "Recap of answers; revise any?"
+        type: yes_no_revise

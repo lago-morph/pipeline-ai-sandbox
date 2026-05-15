@@ -1,0 +1,17 @@
+{
+  "name": "node-circleci-no-agents-md",
+  "description": "Node.js project with CircleCI config and no AGENTS.md. Tests discovery of non-GHA CI.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "circleci",
+    "language": "node",
+    "protocol_installed": false,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    "package.json",
+    ".circleci/config.yml"
+  ]
+}

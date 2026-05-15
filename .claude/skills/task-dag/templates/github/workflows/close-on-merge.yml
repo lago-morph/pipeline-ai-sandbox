@@ -1,0 +1,23 @@
+name: close-on-merge
+on:
+  pull_request:
+    types: [closed]
+permissions:
+  issues: write
+  pull-requests: read
+  contents: write
+jobs:
+  close:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r .agent/scripts/requirements.txt
+      - run: python .agent/scripts/close_on_merge.py
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          AGENT_LOGIN: ${{ vars.AGENT_LOGIN || 'jonathanmanton' }}

@@ -1,0 +1,38 @@
+scenario_id: orchestrate-issue-parallel-fanout
+archetype: python-gha-with-agents-md
+skill_under_test: orchestrate-issue
+target: live-new-repo
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      issue_body: "instructions_inline: implement three independent helpers"
+    expected:
+      issue_number_present: true
+
+  - name: claim
+    inputs:
+      agent_id: "orchestrate-parallel-agent"
+    expected:
+      issue_locked: true
+
+  - name: fanout
+    inputs:
+      max_parallel: 3
+      planned_subagents: 3
+    expected:
+      subagents_dispatched: 3
+      subagent_branches_created: 3
+
+  - name: merge
+    inputs:
+      merge_order: plan
+    expected:
+      feature_branch_advanced: true
+      pr_opened: true
+
+  - name: verify
+    expected:
+      pr_merged: true
+      meta_status: shipped
+      no_cross_contamination: true

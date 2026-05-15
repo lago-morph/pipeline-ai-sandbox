@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/log-manifest.schema.json",
+  "title": "log manifest",
+  "description": "Schema for runs/<issue>/<comment>/manifest.json on the _agent_runs orphan branch.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "schema",
+    "command",
+    "args",
+    "checked_out_sha",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "chunks"
+  ],
+  "properties": {
+    "protocol_version": { "type": "integer", "const": 1 },
+    "schema": {
+      "type": "object",
+      "required": ["chunk_format", "fields"],
+      "properties": {
+        "chunk_format": { "type": "string", "const": "jsonl-gz" },
+        "fields": { "type": "object" }
+      }
+    },
+    "command": { "type": "string", "minLength": 1 },
+    "args": { "type": "object" },
+    "checked_out_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "exit_code": { "type": "integer" },
+    "chunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "bytes", "lines"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "lines": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,16 @@
+{
+  "name": "gitlab-only",
+  "description": "GitLab CI config and no GitHub Actions. Tests onboarding's recognition that GHA is required for the protocol.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "gitlab-ci",
+    "language": "unknown",
+    "protocol_installed": false,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    ".gitlab-ci.yml"
+  ]
+}

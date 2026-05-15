@@ -1,0 +1,29 @@
+scenario_id: task-dag-merge-conflicts
+archetype: python-gha-with-agents-md
+skill_under_test: task-dag
+target: synthetic-fixture
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      create_subagent_branches:
+        - id: sub-01
+          touches: [shared.py]
+        - id: sub-02
+          touches: [shared.py]
+    expected:
+      issue_number_present: true
+      subagent_branches_created: 2
+
+  - name: merge
+    inputs:
+      conflict_strategy: fail
+    expected:
+      merge_attempted: true
+      merge_failed: true
+      conflict_paths_present: [shared.py]
+
+  - name: verify
+    expected:
+      meta_status: merge_failed
+      diagnostics_has_conflict_report: true

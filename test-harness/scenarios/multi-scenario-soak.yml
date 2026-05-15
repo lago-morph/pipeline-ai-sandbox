@@ -1,0 +1,33 @@
+scenario_id: multi-scenario-soak
+archetype: python-gha-with-agents-md
+skill_under_test: orchestrate-issue
+target: live-new-repo
+phases:
+  - name: setup
+    inputs:
+      create_issues: 3
+      issue_bodies:
+        - "instructions_inline: helper A"
+        - "instructions_inline: helper B"
+        - "instructions_inline: helper C"
+    expected:
+      issue_numbers_present_count: 3
+
+  - name: fanout
+    inputs:
+      parallel_orchestrators: 3
+      max_parallel_per_run: 2
+    expected:
+      orchestrators_running: 3
+      no_shared_branch_names: true
+
+  - name: merge
+    expected:
+      all_orchestrators_completed: true
+      prs_opened_count: 3
+
+  - name: verify
+    expected:
+      prs_merged_count: 3
+      no_cross_contamination: true
+      no_shared_run_dirs: true

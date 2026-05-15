@@ -1,0 +1,27 @@
+scenario_id: batch-job-happy-path
+archetype: python-gha-with-agents-md
+skill_under_test: batch-job
+target: live-new-repo
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      issue_labels: [agent-task]
+    expected:
+      repo_created: true
+      issue_number_present: true
+
+  - name: invoke
+    inputs:
+      command: echo
+      args:
+        message: "hello from the harness"
+    expected:
+      batch_job_comment_present: true
+      envelope_run_status: completed
+
+  - name: verify
+    expected:
+      envelope_run_status: completed
+      error_kind_absent: true
+      summary_keys_present: [stdout]

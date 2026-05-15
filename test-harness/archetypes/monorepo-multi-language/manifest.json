@@ -1,0 +1,19 @@
+{
+  "name": "monorepo-multi-language",
+  "description": "Monorepo with multiple sub-projects, GHA, and a Jenkinsfile. Tests heterogeneous CI discovery.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "github-actions",
+    "language": "mixed",
+    "protocol_installed": false,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    "api/Dockerfile",
+    "api/.github/workflows/api.yml",
+    "worker/Jenkinsfile",
+    "worker/build.gradle"
+  ]
+}

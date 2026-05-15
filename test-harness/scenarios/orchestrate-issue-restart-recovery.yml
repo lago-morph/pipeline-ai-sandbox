@@ -1,0 +1,36 @@
+scenario_id: orchestrate-issue-restart-recovery
+archetype: python-gha-with-agents-md
+skill_under_test: orchestrate-issue
+target: live-new-repo
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      issue_body: "instructions_inline: implement two helpers"
+    expected:
+      issue_number_present: true
+
+  - name: fanout
+    inputs:
+      max_parallel: 2
+      planned_subagents: 2
+      kill_after_dispatch: true
+    expected:
+      subagents_dispatched: 2
+      orchestrator_killed_mid_fanout: true
+
+  - name: restart
+    inputs:
+      resume_run_id: "<from-state>"
+    expected:
+      restart_acknowledged: true
+      no_duplicate_dispatch: true
+
+  - name: finalise
+    expected:
+      pr_opened: true
+
+  - name: verify
+    expected:
+      pr_merged: true
+      meta_status: shipped

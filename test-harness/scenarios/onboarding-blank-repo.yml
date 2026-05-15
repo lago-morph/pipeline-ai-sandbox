@@ -1,0 +1,37 @@
+scenario_id: onboarding-blank-repo
+archetype: blank-repo
+skill_under_test: onboarding
+target: live-new-repo
+phases:
+  - name: detect
+    expected:
+      protocol_installed: false
+      onboarding_started: false
+      agents_md_present: false
+
+  - name: interview
+    inputs:
+      scripted_answers:
+        intent: "tests the onboarding skill"
+        problems: "validation"
+        adoption: "full"
+    expected:
+      dialog_file_present: true
+      questions_answered: 22
+
+  - name: recommend
+    expected:
+      recommendations_file_present: true
+      no_agents_md_edits_proposed: true
+
+  - name: apply
+    inputs:
+      approve_all: true
+    expected:
+      pointer_added_to_agents_md: true
+      protocol_templates_installed: true
+
+  - name: verify
+    expected:
+      meta_status: onboarded
+      dialog_file_committed: true

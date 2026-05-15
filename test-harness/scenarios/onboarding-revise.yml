@@ -1,0 +1,41 @@
+scenario_id: onboarding-revise
+archetype: python-gha-with-agents-md
+skill_under_test: onboarding
+target: synthetic-fixture
+phases:
+  - name: setup
+    inputs:
+      preexisting_dialog_complete: true
+      preexisting_recommendations_applied: true
+    expected:
+      dialog_file_present: true
+      recommendations_file_present: true
+
+  - name: detect
+    expected:
+      protocol_installed: true
+      onboarding_started: true
+      revise_offered: true
+
+  - name: interview
+    inputs:
+      mode: revise
+      scripted_answers:
+        change_integration: "switch from pointer-only to full"
+    expected:
+      dialog_revision_recorded: true
+
+  - name: recommend
+    expected:
+      recommendations_diff_present: true
+
+  - name: apply
+    inputs:
+      approve_all: true
+    expected:
+      revised_integration_applied: true
+
+  - name: verify
+    expected:
+      meta_status: onboarded
+      revision_count: 1

@@ -1,0 +1,24 @@
+name: lock-and-sweep
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+  contents: read
+concurrency:
+  group: lock-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r .agent/scripts/requirements.txt
+      - run: python .agent/scripts/lock_and_sweep.py
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          AGENT_LOGIN: ${{ vars.AGENT_LOGIN || 'jonathanmanton' }}

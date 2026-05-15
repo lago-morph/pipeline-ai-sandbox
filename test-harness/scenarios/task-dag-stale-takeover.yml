@@ -1,0 +1,25 @@
+scenario_id: task-dag-stale-takeover
+archetype: python-gha-with-agents-md
+skill_under_test: task-dag
+target: synthetic-fixture
+phases:
+  - name: setup
+    inputs:
+      create_issue: true
+      pre_lock_with_agent_id: "stale-agent-001"
+      stale_age_minutes: 120
+    expected:
+      issue_number_present: true
+      issue_locked: true
+
+  - name: claim
+    inputs:
+      agent_id: "fresh-takeover-agent"
+    expected:
+      claim_succeeded: true
+      previous_agent_evicted: true
+
+  - name: verify
+    expected:
+      meta_status: claimed
+      meta_agent_id: "fresh-takeover-agent"

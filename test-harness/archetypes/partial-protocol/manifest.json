@@ -1,0 +1,16 @@
+{
+  "name": "partial-protocol",
+  "description": "Has .agent/config.json but no workflow YAMLs. Tests skills that detect a partial install.",
+  "expected_discovery": {
+    "agents_md_present": false,
+    "claude_md_present": false,
+    "ci_system": "none",
+    "language": "unknown",
+    "protocol_installed": true,
+    "onboarding_started": false
+  },
+  "files": [
+    "README.md",
+    ".agent/config.json"
+  ]
+}

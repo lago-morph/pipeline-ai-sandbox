@@ -1,0 +1,39 @@
+scenario_id: onboarding-existing-agents-md
+archetype: python-gha-with-agents-md
+skill_under_test: onboarding
+target: synthetic-fixture
+phases:
+  - name: detect
+    expected:
+      protocol_installed: false
+      onboarding_started: false
+      agents_md_present: true
+      claude_md_present: true
+
+  - name: interview
+    inputs:
+      scripted_answers:
+        intent: "augment existing AGENTS.md"
+        problems: "reduce friction"
+        adoption: "pointer-only"
+    expected:
+      dialog_file_present: true
+      questions_answered_min: 12
+
+  - name: recommend
+    expected:
+      recommendations_file_present: true
+      no_agents_md_edits_proposed: true
+      pointer_edit_proposed: true
+
+  - name: apply
+    inputs:
+      approve_all: true
+    expected:
+      pointer_added_to_agents_md: true
+      agents_md_body_unchanged: true
+
+  - name: verify
+    expected:
+      meta_status: onboarded
+      claude_md_body_unchanged: true
