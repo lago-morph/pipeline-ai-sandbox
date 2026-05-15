@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/commands/build.schema.json",
+  "title": "build",
+  "description": "Schema for the build command. Stub for the POC.",
+  "type": "object",
+  "required": ["args", "summary_completed", "summary_error"],
+  "properties": {
+    "args": {
+      "type": "object",
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "release": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "summary_completed": {
+      "type": "object",
+      "required": ["artifact_path", "size_bytes", "duration_seconds"],
+      "properties": {
+        "artifact_path": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "duration_seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "summary_error": {
+      "type": "object",
+      "required": ["error_kind", "error_detail"],
+      "properties": {
+        "error_kind": { "type": "string" },
+        "error_detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

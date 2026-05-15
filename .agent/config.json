@@ -1,0 +1,30 @@
+{
+  "protocol_version": 1,
+  "labels": {
+    "agent_task": "agent-task",
+    "runner_failure": "runner-failure"
+  },
+  "issue": {
+    "stale_seconds": 7200,
+    "heartbeat_min_interval_seconds": 60
+  },
+  "comment": {
+    "runner_pickup_timeout_seconds": 300,
+    "running_timeout_seconds": 3600,
+    "poll_initial_seconds": 30,
+    "poll_backoff": [
+      { "after_seconds": 300, "interval_seconds": 60 },
+      { "after_seconds": 600, "interval_seconds": 120 }
+    ],
+    "poll_total_timeout_seconds": 3600
+  },
+  "logs": {
+    "branch": "_agent_runs",
+    "max_chunk_bytes_compressed": 524288
+  },
+  "branches": {
+    "feature_pattern": "agent/<issue>-<slug>",
+    "subagent_pattern": "<feature_branch>--sub-<subagent_id>"
+  },
+  "commands": ["run-tests", "build", "echo", "bad-summary", "chatty"]
+}
