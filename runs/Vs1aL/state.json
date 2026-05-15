@@ -1,0 +1,24 @@
+{
+  "run_id": "Vs1aL",
+  "started_at": "2026-05-15T00:00:00Z",
+  "agent_login": "jonathanmanton",
+  "github_repo": "lago-morph/pipeline-ai-sandbox",
+  "working_branch": "claude/execute-repo-plan-Vs1aL",
+  "environment": {
+    "python_version": "3.11.15",
+    "mcp_scope": "lago-morph/pipeline-ai-sandbox",
+    "mcp_scope_constraint": "Cannot create separate test repos; live-new-repo scenarios must run as synthetic-fixture in this environment."
+  },
+  "phases": [
+    {"name": "phase-0-preflight", "status": "in_progress"},
+    {"name": "phase-1-scaffolding", "status": "pending"},
+    {"name": "phase-2-protocol-install", "status": "pending"},
+    {"name": "phase-3-archetype-materialisation", "status": "pending"},
+    {"name": "phase-4-scenario-implementation", "status": "pending"},
+    {"name": "phase-5-drive-scenarios-live", "status": "pending"},
+    {"name": "phase-6-analyze-results", "status": "pending"},
+    {"name": "phase-7-dogfood-orchestrate-issue", "status": "pending"},
+    {"name": "phase-8-retrospective", "status": "pending"},
+    {"name": "phase-9-commit-pr", "status": "pending"}
+  ]
+}

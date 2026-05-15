@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# pipeline-ai-sandbox specific
+runs/*/state.json.tmp
+runs/*/diagnostics/
+test-harness/runs/*/
+!test-harness/runs/.gitkeep
+retrospective/*/scratch/
+
