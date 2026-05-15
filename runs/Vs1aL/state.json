@@ -1,24 +1,32 @@
 {
   "run_id": "Vs1aL",
   "started_at": "2026-05-15T00:00:00Z",
+  "ended_at": "2026-05-15T00:00:00Z",
   "agent_login": "jonathanmanton",
   "github_repo": "lago-morph/pipeline-ai-sandbox",
   "working_branch": "claude/execute-repo-plan-Vs1aL",
   "environment": {
     "python_version": "3.11.15",
     "mcp_scope": "lago-morph/pipeline-ai-sandbox",
-    "mcp_scope_constraint": "Cannot create separate test repos; live-new-repo scenarios must run as synthetic-fixture in this environment."
+    "mcp_scope_constraint": "Cannot create separate test repos; live-new-repo scenarios degrade to synthetic-fixture."
   },
   "phases": [
-    {"name": "phase-0-preflight", "status": "in_progress"},
-    {"name": "phase-1-scaffolding", "status": "pending"},
-    {"name": "phase-2-protocol-install", "status": "pending"},
-    {"name": "phase-3-archetype-materialisation", "status": "pending"},
-    {"name": "phase-4-scenario-implementation", "status": "pending"},
-    {"name": "phase-5-drive-scenarios-live", "status": "pending"},
-    {"name": "phase-6-analyze-results", "status": "pending"},
-    {"name": "phase-7-dogfood-orchestrate-issue", "status": "pending"},
-    {"name": "phase-8-retrospective", "status": "pending"},
-    {"name": "phase-9-commit-pr", "status": "pending"}
-  ]
+    {"name": "phase-0-preflight",                 "status": "done"},
+    {"name": "phase-1-scaffolding",               "status": "done"},
+    {"name": "phase-2-protocol-install",          "status": "done", "note": "agent-task label create deferred: no MCP create-label tool"},
+    {"name": "phase-3-archetype-materialisation", "status": "done"},
+    {"name": "phase-4-scenario-implementation",   "status": "done"},
+    {"name": "phase-5-drive-scenarios-live",      "status": "done", "note": "degraded to synthetic; 1 full-pass / 4 partial / 13 skipped / 0 failed"},
+    {"name": "phase-6-analyze-results",           "status": "done", "artifact": "runs/Vs1aL/test-results.md"},
+    {"name": "phase-7-dogfood-orchestrate-issue", "status": "constrained", "note": "Issue #1 opened with agent-meta block; full live execution deferred"},
+    {"name": "phase-8-retrospective",             "status": "done", "artifact": "retrospective/2026-05-15-01.md"},
+    {"name": "phase-9-commit-pr",                 "status": "in_progress"}
+  ],
+  "artifacts": {
+    "test_results_md": "runs/Vs1aL/test-results.md",
+    "retrospective_md": "retrospective/2026-05-15-01.md",
+    "agents_suggestions_md": "retrospective/AGENTS-suggestions.md",
+    "dogfood_issue": "https://github.com/lago-morph/pipeline-ai-sandbox/issues/1",
+    "orphan_branch": "_agent_runs"
+  }
 }

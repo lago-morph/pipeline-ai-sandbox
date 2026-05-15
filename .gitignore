@@ -222,5 +222,7 @@ runs/*/state.json.tmp
 runs/*/diagnostics/
 test-harness/runs/*/
 !test-harness/runs/.gitkeep
+harness/runs/*/
+!harness/runs/.gitkeep
 retrospective/*/scratch/
 
