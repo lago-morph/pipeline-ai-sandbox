@@ -1,9 +1,10 @@
 """``lock-and-sweep`` script (§7.1).
 
 Run on ``issues.opened``. Validates the issue belongs to the protocol
-(creator is ``agent_login`` and body contains a parsable ``agent-meta``
-block); applies the ``agent-task`` label; sweeps any non-agent comments
-that snuck in before the label was applied.
+(body contains a parsable ``agent-meta`` block AND the creator is
+authorised — see "Authorisation model" below); applies the
+``agent-task`` label; sweeps any unauthorised comments that snuck in
+before the label was applied.
 
 Historically this script also locked the issue at creation time, but
 GitHub refuses comments from ``GITHUB_TOKEN`` (the github-actions[bot]
@@ -14,16 +15,28 @@ audit-tamper-prevention seal rather than an injection guard. The
 injection-guard role is filled by the batch-job-handler workflow's
 label + author ``if:`` filter, which makes foreign comments inert.
 
-``agent_login`` is sourced from the ``AGENT_LOGIN`` environment variable
-(populated from a repo-level GitHub Actions variable so multi-user
-deployments don't require workflow-YAML edits) or passed in explicitly
-by tests. The static ``agent_login`` config key was removed in session 3
-to drop the indirection.
+Authorisation model
+-------------------
+
+The script supports two modes, both safe:
+
+1. **Pinned mode** — ``AGENT_LOGIN`` is set (explicit arg or env var).
+   The creator's ``login`` must match exactly. Use this for single-bot
+   deployments where exactly one identity drives the protocol.
+
+2. **Open mode** — ``AGENT_LOGIN`` is unset (empty). The creator's
+   ``author_association`` must be one of ``OWNER``, ``MEMBER``,
+   ``COLLABORATOR`` — i.e. they have write access to the repo. Use this
+   for multi-user deployments (clones / forks where any maintainer can
+   drive the protocol) so the gate is not tied to a personal login.
+
+The comment sweep applies the same rule: in pinned mode, only the
+agent's own comments are preserved; in open mode, comments from any
+trusted-association author are preserved.
 
 Importable as a module: call :func:`run` directly with a
 ``GitHubClient`` for tests. The ``__main__`` entry point reads
-environment variables (``ISSUE_NUMBER``, ``AGENT_LOGIN``) and is wired
-up by the workflow file.
+environment variables and is wired up by the workflow file.
 """
 
 from __future__ import annotations
@@ -46,6 +59,23 @@ else:
     from .common import GitHubClient, load_config, parse_agent_meta
 
 
+# GitHub author_association values that imply write access to the repo.
+# https://docs.github.com/en/graphql/reference/enums#commentauthorassociation
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def _is_trusted(
+    *,
+    login: Optional[str],
+    association: Optional[str],
+    agent_login: Optional[str],
+) -> bool:
+    """Authorisation predicate. See module docstring for the two modes."""
+    if agent_login:
+        return login == agent_login
+    return (association or "").upper() in TRUSTED_ASSOCIATIONS
+
+
 def run(
     client: GitHubClient,
     issue_number: int,
@@ -56,20 +86,13 @@ def run(
     """Apply lock-and-sweep behaviour to an issue.
 
     ``agent_login`` resolution order: explicit argument → ``AGENT_LOGIN``
-    environment variable → raise. There is no fallback to a static config
-    key (removed in session 3).
+    environment variable → unset (open mode). See module docstring.
 
     Returns a small dict describing what happened (useful for tests).
     """
     cfg = config or load_config()
     if agent_login is None:
         agent_login = os.environ.get("AGENT_LOGIN") or None
-    if not agent_login:
-        raise RuntimeError(
-            "agent_login is required: pass it explicitly or set the "
-            "AGENT_LOGIN environment variable (typically populated by the "
-            "workflow from vars.AGENT_LOGIN)"
-        )
     agent_task_label = (
         agent_task_label
         or cfg.get("labels", {}).get("agent_task", "agent-task")
@@ -78,17 +101,28 @@ def run(
     issue = client.get_issue(issue_number)
     body = issue.get("body") or ""
     creator_login = (issue.get("user") or {}).get("login")
+    creator_assoc = issue.get("author_association")
 
     meta = parse_agent_meta(body)
     if meta is None:
         return {"action": "noop", "reason": "no_agent_meta"}
-    if creator_login != agent_login:
-        return {"action": "noop", "reason": "creator_not_agent_login"}
+    if not _is_trusted(
+        login=creator_login,
+        association=creator_assoc,
+        agent_login=agent_login,
+    ):
+        return {
+            "action": "noop",
+            "reason": (
+                "creator_not_agent_login" if agent_login
+                else "creator_not_trusted_association"
+            ),
+        }
 
     # 1. Apply label.
     client.add_label(issue_number, agent_task_label)
 
-    # 2. Sweep non-agent comments that snuck in before the label was
+    # 2. Sweep unauthorised comments that snuck in before the label was
     #    applied. We deliberately do NOT lock the issue here: a locked
     #    issue rejects comments from the GITHUB_TOKEN bot identity, and
     #    the batch-job-handler workflow needs to write its terminal
@@ -98,8 +132,11 @@ def run(
     kept_unexpected = 0
     for c in client.list_comments(issue_number):
         author = (c.get("user") or {}).get("login")
+        assoc = c.get("author_association")
         cid = c["id"]
-        if author == agent_login:
+        if _is_trusted(
+            login=author, association=assoc, agent_login=agent_login
+        ):
             kept_unexpected += 1
             continue
         client.delete_comment(cid)
@@ -120,15 +157,17 @@ def main() -> int:
       - ``ISSUE_NUMBER``       the issue that just opened
       - ``GH_TOKEN`` / ``GITHUB_TOKEN``  REST API token
       - ``GITHUB_REPOSITORY``  ``owner/repo`` slug
-      - ``AGENT_LOGIN``        bot login the protocol expects to author
-                                envelopes (set from ``vars.AGENT_LOGIN``)
     Optional:
+      - ``AGENT_LOGIN``        bot login to pin against (set from
+                                ``vars.AGENT_LOGIN``). When unset, the
+                                script falls back to gating on the
+                                issue creator's ``author_association``.
       - ``AGENT_TASK_LABEL``   override the label from ``.agent/config.json``
 
     On success exits 0; on uncaught exception prints to stderr and
     exits 1. Tests call :func:`run` directly with an in-memory client.
     """
-    required = ["ISSUE_NUMBER", "GITHUB_TOKEN", "GITHUB_REPOSITORY", "AGENT_LOGIN"]
+    required = ["ISSUE_NUMBER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"]
     print(
         "lock_and_sweep: required env vars: "
         + ", ".join(required)
@@ -144,14 +183,12 @@ def main() -> int:
             ("ISSUE_NUMBER", issue_number),
             ("GITHUB_TOKEN", token),
             ("GITHUB_REPOSITORY", repo_slug),
-            ("AGENT_LOGIN", agent_login),
         ) if not val
     ]
     if missing:
         print(f"lock_and_sweep: missing env vars: {missing}", file=sys.stderr)
         return 1
     assert issue_number is not None and token is not None and repo_slug is not None
-    assert agent_login is not None
     if "/" not in repo_slug:
         print(
             f"lock_and_sweep: GITHUB_REPOSITORY must be 'owner/repo', got: {repo_slug!r}",

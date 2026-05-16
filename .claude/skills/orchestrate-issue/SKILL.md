@@ -12,7 +12,19 @@ allowed-tools:
   - Write
   - Edit
   - Agent
-  - mcp__github__*
+  - mcp__github__get_me
+  - mcp__github__issue_read
+  - mcp__github__issue_write
+  - mcp__github__add_issue_comment
+  - mcp__github__create_branch
+  - mcp__github__list_branches
+  - mcp__github__list_issues
+  - mcp__github__create_or_update_file
+  - mcp__github__get_file_contents
+  - mcp__github__create_pull_request
+  - mcp__github__pull_request_read
+  - mcp__github__list_pull_requests
+  - mcp__github__update_pull_request
 ---
 
 # orchestrate-issue
