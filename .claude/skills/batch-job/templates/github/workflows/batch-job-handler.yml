@@ -10,9 +10,15 @@ concurrency:
   cancel-in-progress: false
 jobs:
   handle:
+    # Security gate: require BOTH the agent-task label AND a trusted
+    # author_association on the comment. When vars.AGENT_LOGIN is set,
+    # additionally pin to that specific login (single-bot deployments).
+    # When unset, any user with write access (OWNER/MEMBER/COLLABORATOR)
+    # can drive the protocol — no per-deployment hardcode required.
     if: |
       contains(github.event.issue.labels.*.name, 'agent-task') &&
-      github.event.comment.user.login == (vars.AGENT_LOGIN || 'jonathanmanton')
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      (vars.AGENT_LOGIN == '' || github.event.comment.user.login == vars.AGENT_LOGIN)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -36,7 +42,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
-          AGENT_LOGIN: ${{ vars.AGENT_LOGIN || 'jonathanmanton' }}
+          AGENT_LOGIN: ${{ vars.AGENT_LOGIN }}
       - name: marker-end
         if: always()
         run: |

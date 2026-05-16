@@ -82,7 +82,69 @@ On restart:
 If state is missing or unreadable, do not invent a new run_id silently;
 abort and surface the discrepancy.
 
-## 6. Where to look for skill specs
+## 6. GitHub MCP discipline
+
+The protocol is designed to run under the **most restrictive** GitHub
+MCP toolset. The agent side never needs label-create, repo-create,
+lock/unlock, delete-comment, workflow-dispatch, or run-rerun tools.
+All of those live inside GitHub Actions workflows that talk to the
+REST API directly via `GITHUB_TOKEN`.
+
+### 6.1 Confirmed-missing tools (and their workarounds)
+
+| Agent-side operation | MCP tool? | Workaround |
+|---|---|---|
+| Apply a label to an issue | No | `lock-and-sweep.yml` auto-applies `agent-task` when the issue creator is trusted. |
+| Lock / unlock an issue | No | `close-on-merge.yml` locks via REST after PR merge. |
+| Delete a stray comment | No | `lock-and-sweep.yml` sweeps via REST on `issues.opened`. |
+| Create a repo | No (and MCP scope is single-repo here) | Use existing fixture repos; `live-new-repo` scenarios are opt-in. |
+| Update an existing comment | No | Post a follow-up `agent-ack` envelope comment (POC SPEC §5.2.5). |
+| Read workflow run logs | No (auth-walled) | Workflows post `<!-- workflow-marker -->` comments + base64-embedded stdout tails. |
+| Trigger `workflow_dispatch` | No | Push a commit that triggers `on: push`, or post a comment that triggers `on: issue_comment`. |
+
+If you reach for an MCP tool that doesn't exist, the answer is almost
+always "let a workflow do it" — not "patch around it agent-side."
+
+### 6.2 Source `agent_login` from `mcp__github__get_me`
+
+The MCP server authenticates as the human user (e.g. some
+`somebody123`), not as a generic bot. Hardcoded placeholders like
+`"my-bot"` — or any specific personal login like `"jonathanmanton"` —
+will silently mismatch on every comparison and break the
+identity-based code paths.
+
+**Do**: at session start, call `mcp__github__get_me` once and use
+`me.login` as the `agent_login` argument to skill scripts (`submit.py`,
+`task-dag.claim`, `task-dag.heartbeat`, etc.). Do not persist it
+across sessions — re-resolve each time so a different agent identity
+"just works."
+
+**Don't**: hardcode a login in `.agent/config.json`, AGENTS.md, or any
+workflow YAML literal. The bundled workflows already source from
+`vars.AGENT_LOGIN` (a repo-level Actions variable) with no literal
+fallback; setting that variable is optional (see §6.3).
+
+### 6.3 Workflow authorisation model
+
+The bundled `lock-and-sweep.yml`, `batch-job-handler.yml`, and
+`close-on-merge.yml` gate on **author_association** from the GitHub
+event payload. The `if:` clauses always require:
+
+- The `agent-task` label is present on the issue.
+- `author_association ∈ {OWNER, MEMBER, COLLABORATOR}` — i.e. the
+  comment / issue author has repo write access.
+
+If a repo admin sets `vars.AGENT_LOGIN` to a specific account, the
+workflow additionally pins to that login (single-bot mode). With
+`vars.AGENT_LOGIN` **unset** (the default), any user with repo write
+access can drive the protocol — useful for clones / forks where the
+maintainer isn't a fixed identity.
+
+Random commenters and junk-issue spammers can't trigger the
+handler in either mode: they're filtered out by the
+`author_association` check before the workflow body runs.
+
+## 7. Where to look for skill specs
 
 Per-skill specs live at `docs/skills/<name>/SPEC.md`:
 
@@ -95,7 +157,7 @@ Per-skill specs live at `docs/skills/<name>/SPEC.md`:
 The test-harness spec lives alongside its skill at
 [`test-harness/SPEC.md`](test-harness/SPEC.md).
 
-## 7. Anti-patterns
+## 8. Anti-patterns
 
 - Don't create real production-like GitHub repos. Live scenarios use
   the harness's temporary-repo namespace (`<run_id>-<scenario_id>`)
