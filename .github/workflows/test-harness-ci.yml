@@ -117,7 +117,11 @@ jobs:
           import sys
           import glob
 
-          required_keys = ("name:", "description:", "allowed-tools:")
+          # `name` and `description` are mandatory (the skill catalog
+          # cannot surface a skill without them). `allowed-tools` is
+          # optional: thinking-only skills (e.g. composition-guide,
+          # self-retrospective, subagent-prompting) legitimately omit it.
+          required_keys = ("name:", "description:")
           files = sorted(glob.glob(".claude/skills/*/SKILL.md"))
           if not files:
               print("No SKILL.md files found.", file=sys.stderr)
