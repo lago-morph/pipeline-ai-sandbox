@@ -1,0 +1,16 @@
+[project]
+name = "pipeline-ai-sandbox"
+version = "0.0.0"
+description = "Maintenance project for the agent-job protocol skills"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Vendored / bootstrap-installed code is not edited in this repo. Changes
+# round-trip through the POC's `pipeline-skills-package/` source and get
+# re-bundled. Lint these paths in the POC, not here.
+extend-exclude = [
+    ".agent",
+    ".claude/skills/*/templates",
+]

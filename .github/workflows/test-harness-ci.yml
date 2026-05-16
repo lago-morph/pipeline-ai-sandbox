@@ -1,0 +1,234 @@
+name: test-harness-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Daily run at 07:00 UTC
+    - cron: '0 7 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-validation:
+    name: static-validation (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            echo "requirements-dev.txt not found; installing minimal deps"
+            pip install ruff pyyaml jsonschema
+          fi
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Compile-check Python sources
+        run: |
+          # py_compile every .py file under .claude/skills and test-harness.
+          # Using -exec ... + groups args so a single non-zero exit fails the job.
+          find .claude/skills test-harness -name "*.py" -print0 \
+            | xargs -0 -r python -m py_compile
+
+      - name: YAML parse (scenarios + skill workflow templates)
+        run: |
+          python - <<'PY'
+          import sys
+          import glob
+          import yaml
+
+          patterns = [
+              "test-harness/scenarios/*.yml",
+              "test-harness/scenarios/*.yaml",
+              ".claude/skills/*/templates/github/workflows/*.yml",
+              ".claude/skills/*/templates/github/workflows/*.yaml",
+              ".claude/skills/*/templates/*.yml",
+              ".claude/skills/*/templates/*.yaml",
+          ]
+          files = []
+          for p in patterns:
+              files.extend(glob.glob(p))
+          if not files:
+              print("No YAML files discovered; nothing to parse.")
+          errors = []
+          for f in sorted(set(files)):
+              try:
+                  with open(f, "r", encoding="utf-8") as fh:
+                      list(yaml.safe_load_all(fh))
+                  print(f"ok: {f}")
+              except Exception as e:
+                  errors.append((f, repr(e)))
+                  print(f"FAIL: {f}: {e!r}", file=sys.stderr)
+          if errors:
+              print(f"{len(errors)} YAML parse failure(s)", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: JSON parse (archetype manifests)
+        run: |
+          python - <<'PY'
+          import sys
+          import glob
+          import json
+
+          files = sorted(glob.glob("test-harness/archetypes/*/manifest.json"))
+          if not files:
+              print("No archetype manifests found.", file=sys.stderr)
+              sys.exit(1)
+          errors = []
+          for f in files:
+              try:
+                  with open(f, "r", encoding="utf-8") as fh:
+                      json.load(fh)
+                  print(f"ok: {f}")
+              except Exception as e:
+                  errors.append((f, repr(e)))
+                  print(f"FAIL: {f}: {e!r}", file=sys.stderr)
+          if errors:
+              print(f"{len(errors)} JSON parse failure(s)", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: SKILL.md frontmatter validation
+        run: |
+          python - <<'PY'
+          import sys
+          import glob
+
+          required_keys = ("name:", "description:", "allowed-tools:")
+          files = sorted(glob.glob(".claude/skills/*/SKILL.md"))
+          if not files:
+              print("No SKILL.md files found.", file=sys.stderr)
+              sys.exit(1)
+          errors = []
+          for f in files:
+              with open(f, "r", encoding="utf-8") as fh:
+                  text = fh.read()
+              if not text.startswith("---"):
+                  errors.append((f, "does not start with '---'"))
+                  continue
+              # Extract frontmatter block between first '---' and the next '---' on its own line.
+              lines = text.splitlines()
+              if lines[0].strip() != "---":
+                  errors.append((f, "first line is not '---'"))
+                  continue
+              end_idx = None
+              for i in range(1, len(lines)):
+                  if lines[i].strip() == "---":
+                      end_idx = i
+                      break
+              if end_idx is None:
+                  errors.append((f, "frontmatter terminator '---' not found"))
+                  continue
+              frontmatter = "\n".join(lines[1:end_idx])
+              missing = [k for k in required_keys if k not in frontmatter]
+              if missing:
+                  errors.append((f, f"missing keys: {missing}"))
+                  continue
+              print(f"ok: {f}")
+          if errors:
+              for f, msg in errors:
+                  print(f"FAIL: {f}: {msg}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Scenario cross-reference (archetype + skill existence)
+        run: |
+          python - <<'PY'
+          import sys
+          import glob
+          import os
+          import yaml
+
+          scenarios = sorted(glob.glob("test-harness/scenarios/*.yml")
+                             + glob.glob("test-harness/scenarios/*.yaml"))
+          if not scenarios:
+              print("No scenarios found.", file=sys.stderr)
+              sys.exit(1)
+
+          available_archetypes = {
+              os.path.basename(p) for p in glob.glob("test-harness/archetypes/*")
+              if os.path.isdir(p)
+          }
+          available_skills = {
+              os.path.basename(p) for p in glob.glob(".claude/skills/*")
+              if os.path.isdir(p)
+          }
+
+          errors = []
+          for s in scenarios:
+              with open(s, "r", encoding="utf-8") as fh:
+                  try:
+                      data = yaml.safe_load(fh)
+                  except Exception as e:
+                      errors.append((s, f"YAML parse: {e!r}"))
+                      continue
+              if not isinstance(data, dict):
+                  errors.append((s, "top-level YAML is not a mapping"))
+                  continue
+              # Single-archetype scenario
+              archetype = data.get("archetype")
+              # Multi-scenario soak / variants may list scenarios; accept either form.
+              child_scenarios = data.get("scenarios")
+              archetypes_to_check = []
+              skills_to_check = []
+              if archetype:
+                  archetypes_to_check.append(archetype)
+              if "skill_under_test" in data:
+                  skills_to_check.append(data["skill_under_test"])
+              if isinstance(child_scenarios, list):
+                  for child in child_scenarios:
+                      if isinstance(child, dict):
+                          if child.get("archetype"):
+                              archetypes_to_check.append(child["archetype"])
+                          if child.get("skill_under_test"):
+                              skills_to_check.append(child["skill_under_test"])
+              if not archetypes_to_check and not skills_to_check:
+                  # Nothing to cross-check (some meta scenarios may be valid).
+                  print(f"skip-xref: {s} (no archetype/skill keys)")
+                  continue
+              for a in archetypes_to_check:
+                  if a not in available_archetypes:
+                      errors.append((s, f"archetype '{a}' not found under test-harness/archetypes/"))
+              for sk in skills_to_check:
+                  if sk not in available_skills:
+                      errors.append((s, f"skill '{sk}' not found under .claude/skills/"))
+              print(f"ok: {s}")
+
+          if errors:
+              for f, msg in errors:
+                  print(f"FAIL: {f}: {msg}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Scenario runner discovery (allow-empty)
+        run: |
+          python - <<'PY'
+          import glob
+          runners = sorted(glob.glob("test-harness/runners/*.py"))
+          print(f"discovered {len(runners)} scenario runner(s)")
+          for r in runners:
+              print(f"  {r}")
+          PY

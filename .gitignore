@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# pipeline-ai-sandbox specific
+runs/*/state.json.tmp
+runs/*/diagnostics/
+test-harness/runs/*/
+!test-harness/runs/.gitkeep
+harness/runs/*/
+!harness/runs/.gitkeep
+retrospective/*/scratch/
+
