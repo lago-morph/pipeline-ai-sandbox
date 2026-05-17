@@ -1,7 +1,7 @@
 # NEW-REPO-PLAN — the maintenance project for the 5 skills
 
 Status: **in progress, post-bootstrap**. Phases 0-4, 6, 8, 9 done; Phase
-5 partial (2 of 8 live-target scenarios implemented + unit-tested); Phase
+5 partial (3 of 8 live-target scenarios implemented + unit-tested); Phase
 7 not yet driven. See "Current status" below for the breakdown and
 "What's left" at the end for the remaining backlog.
 
@@ -26,7 +26,7 @@ new `pipeline-ai-sandbox` repo after the bundle has been applied.
 | 2 — protocol self-install | done | PR #2 (`d254101`) |
 | 3 — archetype verification | done (inlined, not fanout) | PR #2 |
 | 4 — scenario harness + 18 runners | done | PR #2 (`f1ed891`) |
-| 5 — drive scenarios live | **partial — 2/8** | PR #5 (live `batch-job-happy-path`) + this PR (live `orchestrate-issue-single-subagent`) |
+| 5 — drive scenarios live | **partial — 3/8** | PR #5 (`batch-job-happy-path`) + PR #12 (`orchestrate-issue-single-subagent`) + this PR (`orchestrate-issue-parallel-fanout`) |
 | 6 — analyze results | done (against partial data) | PR #2 (`runs/Vs1aL/test-results.md`) |
 | 7 — dogfood orchestrate-issue | **not driven** | Issue #1 opened, never executed |
 | 8 — self-retrospective | done | PR #2 + PR #3 (`retrospective/2026-05-16-2.md`) |
@@ -53,8 +53,8 @@ The 18 scenarios split by YAML-declared `target`:
 | Bucket | Count | Scenarios |
 |---|---|---|
 | `synthetic-fixture` (needs in-process mock skill driver) | 10 | `batch-job-parse-error`, `batch-job-runner-pickup-timeout`, `batch-job-branch-sha-mismatch`, `composition-guide-render`, `onboarding-decline`, `onboarding-existing-agents-md`, `onboarding-resume-mid-interview`, `onboarding-revise`, `task-dag-stale-takeover`, `task-dag-merge-conflicts` |
-| `live-new-repo` — done | 2 | `batch-job-happy-path`, `orchestrate-issue-single-subagent` |
-| `live-new-repo` — runnable here, not yet implemented | 3 | `orchestrate-issue-parallel-fanout`, `orchestrate-issue-restart-recovery`, `task-dag-claim-and-plan` |
+| `live-new-repo` — done | 3 | `batch-job-happy-path`, `orchestrate-issue-single-subagent`, `orchestrate-issue-parallel-fanout` |
+| `live-new-repo` — runnable here, not yet implemented | 2 | `orchestrate-issue-restart-recovery`, `task-dag-claim-and-plan` |
 | `live-new-repo` — needs a fresh repo (archetype mismatch) | 3 | `onboarding-blank-repo`, `protocol-installed-not-onboarded`, `multi-scenario-soak` |
 
 What actually passes today (from PR #2 retro): **1 fully passing**
@@ -567,34 +567,22 @@ Phase 6 analysis once those land to produce a real
    scope so the dispatcher can create per-scenario temp repos under
    the agent's account, OR (b) an explicit ADR adopting "live-new-repo
    is opt-in only where the archetype permits; everything else is
-   synthetic-only in this repo". The retro lists the ADR; user
-   decision per ADR.
-
-### Codification of lessons (no skill-implementation gating)
-
-8. **Adopt the 10 AGENTS.md suggestions** from
-   `retrospective/2026-05-16-2/AGENTS-suggestions.md`. Partial overlap
-   with existing `AGENTS.md` §6 (GitHub MCP discipline); suggestions
-   1, 2, 3, 5, 6, 7, 9, 10 are not yet absorbed. Mechanical paste
-   work — one PR.
-9. **Author the 4 proposed skill specs as skills.** Specs already exist
-   at `retrospective/2026-05-16-2/*-spec.md`:
-   `vendored-bundle-discipline`, `orphan-branch-safe-creation`,
-   `honest-synthetic-harness`, `runner-template-generation`. Each gets
-   a `.claude/skills/<name>/` directory with `SKILL.md` + any helper
-   scripts.
-10. **Author the 6 proposed ADRs** (titles in
-    `retrospective/2026-05-16-2.md` Part 4). User decides per ADR
-    whether to author.
+   synthetic-only in this repo". User decision required.
 
 ### Operational documentation
 
-11. **`RUNNING-LOCALLY.md`** documenting how to drive Phase 5 + Phase 7
-    from a local Claude Code CLI on Linux: `gh auth login`,
-    `GITHUB_TOKEN` exposure, MCP server config, and the exact
-    `pytest test-harness/tests` + `python test-harness/runners/<id>.py
-    --target=live-new-repo` invocation. Currently lives only in
-    conversation history.
+8. **`RUNNING-LOCALLY.md`** documenting how to drive Phase 5 + Phase 7
+   from a local Claude Code CLI on Linux: `gh auth login`,
+   `GITHUB_TOKEN` exposure, MCP server config, and the exact
+   `pytest test-harness/tests` + `python test-harness/runners/<id>.py
+   --target=live-new-repo` invocation. Currently lives only in
+   conversation history.
+
+> Note: retrospective-derived backlog items (adopting AGENTS-suggestions,
+> authoring proposed skill specs from retro sibling dirs, authoring
+> proposed ADRs) have been removed from this plan. Retrospectives are
+> reference material, not a TODO list — per-item adoption happens only
+> on explicit user direction.
 
 ## What happens after this plan succeeds
 
