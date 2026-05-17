@@ -1107,6 +1107,466 @@ class TaskDagClaimObserver:
             "agent_id_present": bool(meta.get("agent_id")),
         }
 
+# ---------------------------------------------------------------------------
+# OrchestrateIssueRestartObserver
+# ---------------------------------------------------------------------------
+
+
+class OrchestrateIssueRestartObserver:
+    """Observer for ``orchestrate-issue-restart-recovery``.
+
+    Drives 5 phases: ``setup``, ``fanout`` (with ``kill_after_dispatch``),
+    ``restart``, ``finalise``, ``verify``. The "kill" is simulated by
+    skipping the poll-to-terminal step in fanout; restart rehydrates
+    state by querying GitHub (which IS the durable state per the
+    protocol — branches + comments + agent-meta).
+
+    The recovery contract demonstrated:
+
+    1. Setup creates the issue with an ``agent-meta`` block + a feature
+       branch.
+    2. Fanout creates sub-branches, posts ``batch-job-request``
+       envelopes, then (with ``kill_after_dispatch``) returns
+       immediately. Records the pre-restart comment count so the
+       restart phase can prove no duplicate dispatches happen.
+    3. Restart simulates a fresh process: clears in-memory state and
+       reconstructs it by reading the issue body (feature_branch),
+       listing branches (sub-branches matching the pattern), and
+       listing comments (request envelopes' ids). Then completes the
+       polling that fanout skipped. Asserts comment count did not
+       grow during restart.
+    4. Finalise fast-forwards each sub-branch's stub file onto the
+       feature branch, opens the PR.
+    5. Verify writes ``status: finished`` to ``agent-meta``, polls the
+       PR until merged (in tests, the test helper invokes
+       ``merge_pull_request``).
+    """
+
+    AGENT_META_START = OrchestrateIssueObserver._AGENT_META_START
+    AGENT_META_END = OrchestrateIssueObserver._AGENT_META_END
+    _parse_agent_meta = OrchestrateIssueObserver._parse_agent_meta
+    _render_body = OrchestrateIssueObserver._render_body
+    _replace_agent_meta = OrchestrateIssueObserver._replace_agent_meta
+
+    def __init__(
+        self,
+        *,
+        github_client: _GitHubClientLike,
+        agent_login: str,
+        base_branch: str = "main",
+        feature_branch: Optional[str] = None,
+        max_parallel: int = 2,
+        subagent_command: str = "echo",
+        subagent_id_prefix: str = "sub",
+        agent_task_label: str = "agent-task",
+        poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+        sleep: Optional[Any] = None,
+        clock: Optional[Any] = None,
+        iso_now: Optional[Any] = None,
+        new_session_id: Optional[Any] = None,
+    ) -> None:
+        if not agent_login:
+            raise ValueError("agent_login is required")
+        if max_parallel < 1:
+            raise ValueError("max_parallel must be >= 1")
+        self._client = github_client
+        self._agent_login = agent_login
+        self._base_branch = base_branch
+        self._feature_branch_arg = feature_branch
+        self._max_parallel = max_parallel
+        self._subagent_command = subagent_command
+        self._subagent_id_prefix = subagent_id_prefix
+        self._agent_task_label = agent_task_label
+        self._poll_interval_s = poll_interval_s
+        self._poll_timeout_s = poll_timeout_s
+        self._sleep = sleep or time.sleep
+        self._clock = clock or time.monotonic
+        if iso_now is None:
+            from datetime import datetime, timezone
+
+            def _iso_now() -> str:
+                return datetime.now(tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+
+            self._iso_now = _iso_now
+        else:
+            self._iso_now = iso_now
+        self._new_session_id = new_session_id or (lambda: uuid.uuid4().hex)
+        self.state = _OrchestrateState(base_branch=base_branch)
+        # Restart-recovery-specific tracking.
+        self._kill_dispatched = False
+        self._pre_restart_comment_count: Optional[int] = None
+
+    def __call__(
+        self,
+        phase_name: str,
+        inputs: dict[str, Any],
+        fixture: Path,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase_name == "setup":
+            return self._observe_setup(inputs)
+        if phase_name == "fanout":
+            return self._observe_fanout(inputs)
+        if phase_name == "restart":
+            return self._observe_restart(inputs)
+        if phase_name == "finalise":
+            return self._observe_finalise(inputs)
+        if phase_name == "verify":
+            return self._observe_verify(inputs)
+        raise ValueError(
+            f"OrchestrateIssueRestartObserver: unknown phase {phase_name!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # setup — same shape as OrchestrateIssueObserver.setup
+    # ------------------------------------------------------------------
+    def _observe_setup(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        base_sha = self._client.get_branch_head_sha(self._base_branch)
+        if base_sha is None:
+            raise RuntimeError(
+                f"base branch does not exist: {self._base_branch!r}"
+            )
+        self.state.base_sha = base_sha
+        title = inputs.get("title") or "harness: orchestrate-issue-restart-recovery"
+        prose = inputs.get("prose") or (
+            "Harness-driven orchestrate-issue-restart-recovery scenario."
+        )
+        instructions = (
+            inputs.get("issue_body")
+            or inputs.get("instructions_inline")
+            or "implement two helpers"
+        )
+        feature_branch = (
+            self._feature_branch_arg
+            or inputs.get("feature_branch")
+            or f"agent/restart-{_slugify(title)}"
+        )
+        meta = {
+            "protocol_version": 1,
+            "agent_id": f"orchestrate-{self._agent_login}",
+            "session_id": self._new_session_id(),
+            "status": "working",
+            "status_ts": self._iso_now(),
+            "feature_branch": feature_branch,
+            "base_branch": self._base_branch,
+            "parent_issue": None,
+            "depends_on_prs": [],
+            "instructions_path": None,
+            "instructions_inline": instructions,
+            "created_at": self._iso_now(),
+        }
+        body = self._render_body(prose, meta)
+        labels = list(inputs.get("issue_labels") or [self._agent_task_label])
+        issue = self._client.create_issue(title=title, body=body, labels=labels)
+        number = int(issue["number"])
+        labels_on_issue = {
+            (lbl.get("name") if isinstance(lbl, dict) else lbl)
+            for lbl in (issue.get("labels") or [])
+        }
+        if self._agent_task_label not in labels_on_issue:
+            try:
+                self._client.add_label(number, self._agent_task_label)
+            except Exception:
+                pass
+        feature_head_sha = self._client.create_branch(
+            feature_branch, from_branch=self._base_branch
+        )
+        self.state.issue_number = number
+        self.state.feature_branch = feature_branch
+        self.state.feature_baseline_sha = feature_head_sha
+        self.state.agent_id = meta["agent_id"]
+        self.state.session_id = meta["session_id"]
+        self.state.meta_status = "working"
+        return {
+            "issue_number_present": True,
+            "issue_number": number,
+            "feature_branch": feature_branch,
+        }
+
+    # ------------------------------------------------------------------
+    # fanout — dispatch then (optionally) kill before polling.
+    # ------------------------------------------------------------------
+    def _observe_fanout(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.feature_branch is None:
+            raise RuntimeError("fanout phase: setup phase has not run")
+        max_parallel = int(inputs.get("max_parallel") or self._max_parallel)
+        kill = bool(inputs.get("kill_after_dispatch"))
+        command = inputs.get("command") or self._subagent_command
+        args_in = inputs.get("args") or {}
+
+        from envelopes import build_request, serialize
+
+        for i in range(max_parallel):
+            sub_id = f"{self._subagent_id_prefix}-{i + 1:02d}"
+            sub_branch = f"{self.state.feature_branch}--{sub_id}"
+            self._client.create_branch(
+                sub_branch, from_branch=self.state.feature_branch
+            )
+            commit_info = self._client.put_file_contents(
+                path=f".agent/runs/harness/{sub_id}.md",
+                content_bytes=(
+                    f"# Harness subagent {sub_id}\n\n"
+                    f"Stub commit for restart-recovery scenario.\n"
+                ).encode("utf-8"),
+                message=f"harness: stub commit for {sub_id}",
+                branch=sub_branch,
+            )
+            sub_head_sha = (
+                (commit_info.get("commit") or {}).get("sha")
+                if isinstance(commit_info, dict)
+                else None
+            ) or self._client.get_branch_head_sha(sub_branch)
+            envelope = build_request(
+                command=command,
+                args=dict(args_in),
+                branch=sub_branch,
+                commit_sha=sub_head_sha,
+                subagent_id=sub_id,
+                submitted_at=self._iso_now(),
+            )
+            comment = self._client.add_comment(
+                self.state.issue_number, serialize(envelope)
+            )
+            comment_id = int(comment["id"])
+            self.state.subagent_branches.append(sub_branch)
+            self.state.subagent_heads.append(sub_head_sha)
+            self.state.subagent_request_comment_ids.append(comment_id)
+            self.state.subagent_terminal_envelopes.append(None)
+
+        if kill:
+            # Simulate orchestrator death after dispatch but before
+            # polling. Record the comment count so the restart phase
+            # can prove no duplicate dispatch happened.
+            self._kill_dispatched = True
+            self._pre_restart_comment_count = len(
+                self._client.list_comments(self.state.issue_number)
+            )
+            return {
+                "subagents_dispatched": max_parallel,
+                "subagent_branches_created": len(self.state.subagent_branches),
+                "orchestrator_killed_mid_fanout": True,
+                "request_comment_ids": list(self.state.subagent_request_comment_ids),
+            }
+
+        # Normal (non-killed) path: poll to terminal.
+        self._poll_subagent_terminals()
+        return {
+            "subagents_dispatched": max_parallel,
+            "subagent_branches_created": len(self.state.subagent_branches),
+            "orchestrator_killed_mid_fanout": False,
+            "all_subagents_terminal": all(
+                e is not None for e in self.state.subagent_terminal_envelopes
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # restart — rehydrate from GitHub, finish polling.
+    # ------------------------------------------------------------------
+    def _observe_restart(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if not self._kill_dispatched:
+            raise RuntimeError(
+                "restart phase: fanout did not kill mid-dispatch"
+            )
+        issue_number = inputs.get("issue_number") or self.state.issue_number
+        if issue_number is None:
+            raise RuntimeError("restart phase: no issue_number to recover")
+
+        # Simulate a fresh process: clear in-memory state, then rehydrate.
+        recovered = _OrchestrateState(base_branch=self._base_branch)
+        recovered.issue_number = int(issue_number)
+
+        issue = self._client.get_issue(recovered.issue_number)
+        meta = self._parse_agent_meta(issue.get("body"))
+        if meta is None:
+            raise RuntimeError("restart phase: issue body missing agent-meta")
+        recovered.feature_branch = meta.get("feature_branch")
+        recovered.agent_id = meta.get("agent_id")
+        recovered.session_id = meta.get("session_id")
+        recovered.meta_status = meta.get("status")
+
+        # Rehydrate sub-branches by listing branches with the
+        # `<feature>--<sub_prefix>-NN` pattern.
+        sub_prefix = (
+            f"{recovered.feature_branch}--{self._subagent_id_prefix}-"
+            if recovered.feature_branch
+            else None
+        )
+        if sub_prefix:
+            for br in self._client.list_branches():
+                name = br.get("name") if isinstance(br, dict) else None
+                if isinstance(name, str) and name.startswith(sub_prefix):
+                    recovered.subagent_branches.append(name)
+                    recovered.subagent_heads.append(
+                        self._client.get_branch_head_sha(name) or ""
+                    )
+        recovered.subagent_branches.sort()
+
+        # Rehydrate request comment IDs from issue comments.
+        from envelopes import parse, is_terminal, KIND_REQUEST
+
+        recovered.subagent_request_comment_ids = []
+        recovered.subagent_terminal_envelopes = []
+        for c in self._client.list_comments(recovered.issue_number):
+            parsed = parse(c.get("body"))
+            if parsed is None:
+                continue
+            if parsed.get("kind") != KIND_REQUEST:
+                continue
+            recovered.subagent_request_comment_ids.append(int(c["id"]))
+            recovered.subagent_terminal_envelopes.append(
+                parsed if is_terminal(parsed) else None
+            )
+
+        # Preserve the feature_baseline_sha from the original setup —
+        # not directly recoverable from GitHub (we'd need an audit
+        # record). The harness uses the current feature HEAD on the
+        # restart-side as a proxy. The merge phase's "advanced" check
+        # compares to this proxy + post-merge head.
+        recovered.feature_baseline_sha = self._client.get_branch_head_sha(
+            recovered.feature_branch
+        )
+
+        # Swap in the rehydrated state. The original in-memory state is
+        # discarded — restart guarantees no continuation of dead-instance
+        # state.
+        self.state = recovered
+
+        # Finish the polling that fanout skipped. No duplicate dispatch
+        # — assert the comment count hasn't grown.
+        post_restart_comment_count = len(
+            self._client.list_comments(self.state.issue_number)
+        )
+        no_dup = (
+            self._pre_restart_comment_count is None
+            or post_restart_comment_count == self._pre_restart_comment_count
+        )
+
+        self._poll_subagent_terminals()
+        return {
+            "restart_acknowledged": True,
+            "no_duplicate_dispatch": no_dup,
+            "rehydrated_issue_number": self.state.issue_number,
+            "rehydrated_feature_branch": self.state.feature_branch,
+            "rehydrated_subagent_branches": list(self.state.subagent_branches),
+        }
+
+    # ------------------------------------------------------------------
+    # finalise — same logic as OrchestrateIssueObserver.merge.
+    # ------------------------------------------------------------------
+    def _observe_finalise(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if not self.state.subagent_branches:
+            raise RuntimeError("finalise phase: no sub-branches to merge")
+        if self.state.feature_branch is None:
+            raise RuntimeError("finalise phase: feature branch missing")
+
+        for sub_branch in self.state.subagent_branches:
+            sub_id = sub_branch.rsplit("--", 1)[-1]
+            stub_path = f".agent/runs/harness/{sub_id}.md"
+            stub_bytes = (
+                f"# Harness subagent {sub_id}\n\n"
+                f"Stub commit for restart-recovery scenario.\n"
+            ).encode("utf-8")
+            self._client.put_file_contents(
+                path=stub_path,
+                content_bytes=stub_bytes,
+                message=f"harness: merge {sub_id} into {self.state.feature_branch}",
+                branch=self.state.feature_branch,
+            )
+
+        feature_head = self._client.get_branch_head_sha(self.state.feature_branch)
+        feature_advanced = (
+            feature_head is not None
+            and feature_head != self.state.feature_baseline_sha
+        )
+        title = inputs.get("pr_title") or (
+            f"orchestrate-issue-restart-recovery: issue "
+            f"#{self.state.issue_number}"
+        )
+        body = inputs.get("pr_body") or (
+            f"Restart-recovery scenario. Closes #{self.state.issue_number}."
+        )
+        pr = self._client.create_pull_request(
+            title=title,
+            head=self.state.feature_branch,
+            base=self._base_branch,
+            body=body,
+        )
+        pr_number = int(pr["number"])
+        self.state.pr_number = pr_number
+        return {
+            "feature_branch_advanced": feature_advanced,
+            "pr_opened": True,
+            "pr_number": pr_number,
+        }
+
+    # ------------------------------------------------------------------
+    # verify — same logic as OrchestrateIssueObserver.verify.
+    # ------------------------------------------------------------------
+    def _observe_verify(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.pr_number is None:
+            raise RuntimeError("verify phase: finalise phase has not run")
+        issue = self._client.get_issue(self.state.issue_number)
+        meta = self._parse_agent_meta(issue.get("body"))
+        if meta is not None:
+            new_meta = dict(meta)
+            new_meta["status"] = "finished"
+            new_meta["status_ts"] = self._iso_now()
+            new_body = self._replace_agent_meta(issue.get("body"), new_meta)
+            self._client.update_issue(self.state.issue_number, body=new_body)
+            self.state.meta_status = "finished"
+
+        deadline = self._clock() + float(self._poll_timeout_s)
+        pr_merged = False
+        while True:
+            if self._clock() >= deadline:
+                break
+            pr = self._client.get_pull_request(self.state.pr_number)
+            if isinstance(pr, dict) and pr.get("merged"):
+                pr_merged = True
+                break
+            self._sleep(self._poll_interval_s)
+        self.state.pr_merged = pr_merged
+        return {
+            "pr_merged": pr_merged,
+            "pr_number": self.state.pr_number,
+            "meta_status": self.state.meta_status,
+        }
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _poll_subagent_terminals(self) -> None:
+        from envelopes import parse, is_terminal
+
+        deadline = self._clock() + float(self._poll_timeout_s)
+        while True:
+            pending = [
+                idx
+                for idx, env in enumerate(self.state.subagent_terminal_envelopes)
+                if env is None
+            ]
+            if not pending:
+                break
+            if self._clock() >= deadline:
+                break
+            advanced = False
+            for idx in pending:
+                cid = self.state.subagent_request_comment_ids[idx]
+                comment = self._client.get_comment(cid)
+                body = comment.get("body") if isinstance(comment, dict) else None
+                parsed = parse(body)
+                if parsed is not None and is_terminal(parsed):
+                    self.state.subagent_terminal_envelopes[idx] = parsed
+                    advanced = True
+            if not advanced:
+                self._sleep(self._poll_interval_s)
+
+
+
+
 
 # ---------------------------------------------------------------------------
 # Public factory
@@ -1117,6 +1577,7 @@ _OBSERVER_FACTORIES: dict[str, Any] = {
     "orchestrate-issue-single-subagent": OrchestrateIssueObserver,
     "orchestrate-issue-parallel-fanout": OrchestrateIssueObserver,
     "task-dag-claim-and-plan": TaskDagClaimObserver,
+    "orchestrate-issue-restart-recovery": OrchestrateIssueRestartObserver,
 }
 
 
@@ -1138,6 +1599,7 @@ def make_observer(scenario_id: str, **kwargs: Any) -> Any:
 __all__ = [
     "BatchJobObserver",
     "OrchestrateIssueObserver",
+    "OrchestrateIssueRestartObserver",
     "TaskDagClaimObserver",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_POLL_TIMEOUT_S",
