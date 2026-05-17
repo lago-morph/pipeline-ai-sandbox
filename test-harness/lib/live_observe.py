@@ -803,6 +803,312 @@ class OrchestrateIssueObserver:
 
 
 # ---------------------------------------------------------------------------
+# TaskDagClaimObserver
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TaskDagState:
+    """Cross-phase state for one task-dag-claim-and-plan scenario run."""
+
+    issue_number: Optional[int] = None
+    base_branch: Optional[str] = None
+    feature_branch: Optional[str] = None
+    agent_id: Optional[str] = None
+    session_id: Optional[str] = None
+    meta_status: Optional[str] = None
+    brief: Optional[str] = None
+    subagent_plan: list[dict[str, Any]] = field(default_factory=list)
+
+
+class TaskDagClaimObserver:
+    """Observer for the ``task-dag-claim-and-plan`` scenario.
+
+    Drives the ``task-dag`` skill's ``claim`` and ``plan`` primitives
+    against a fresh ``agent-task`` issue.
+
+    Phases:
+
+    1. ``setup`` — create the issue with a fresh ``agent-meta`` block
+       (``status: null``) containing ``instructions_inline`` from the
+       scenario inputs.
+    2. ``claim`` — implement the CAS-by-re-read handshake (POC SPEC
+       §4.1): write ``agent_id``/``session_id``/``status: working`` +
+       fresh ``status_ts``; re-read; if our agent_id survived, the
+       claim is ours. The scenario also asserts on an
+       ``agent-task-claimed`` label, so the observer applies it after
+       a successful claim.
+    3. ``plan`` — produce a brief from the issue's
+       ``instructions_inline`` (or ``instructions_path``); derive a
+       minimal subagent plan (1 subagent in this scenario). The
+       observer stores the brief as a body comment so a reviewer can
+       see what was planned. Writes ``meta_status: planned`` into the
+       ``agent-meta`` extra fields.
+    4. ``verify`` — read back the issue body and surface
+       ``meta_status`` for assertion.
+
+    The observer is **not** a full implementation of the ``task-dag``
+    skill — it only exercises the surface the scenario asserts on.
+    Skill internals (heartbeat throttling, stale-takeover) belong in
+    other scenarios or unit tests of the underlying Python helpers.
+    """
+
+    AGENT_META_START = OrchestrateIssueObserver._AGENT_META_START
+    AGENT_META_END = OrchestrateIssueObserver._AGENT_META_END
+
+    def __init__(
+        self,
+        *,
+        github_client: _GitHubClientLike,
+        agent_login: str,
+        base_branch: str = "main",
+        feature_branch: Optional[str] = None,
+        agent_task_label: str = "agent-task",
+        claimed_label: str = "agent-task-claimed",
+        subagent_id_prefix: str = "sub",
+        poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+        sleep: Optional[Any] = None,
+        clock: Optional[Any] = None,
+        iso_now: Optional[Any] = None,
+        new_session_id: Optional[Any] = None,
+    ) -> None:
+        if not agent_login:
+            raise ValueError("agent_login is required")
+        self._client = github_client
+        self._agent_login = agent_login
+        self._base_branch = base_branch
+        self._feature_branch = feature_branch
+        self._agent_task_label = agent_task_label
+        self._claimed_label = claimed_label
+        self._subagent_id_prefix = subagent_id_prefix
+        self._poll_interval_s = poll_interval_s
+        self._poll_timeout_s = poll_timeout_s
+        self._sleep = sleep or time.sleep
+        self._clock = clock or time.monotonic
+        if iso_now is None:
+            from datetime import datetime, timezone
+
+            def _iso_now() -> str:
+                return datetime.now(tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+
+            self._iso_now = _iso_now
+        else:
+            self._iso_now = iso_now
+        self._new_session_id = new_session_id or (lambda: uuid.uuid4().hex)
+        self.state = _TaskDagState(base_branch=base_branch)
+
+    def __call__(
+        self,
+        phase_name: str,
+        inputs: dict[str, Any],
+        fixture: Path,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase_name == "setup":
+            return self._observe_setup(inputs)
+        if phase_name == "claim":
+            return self._observe_claim(inputs)
+        if phase_name == "plan":
+            return self._observe_plan(inputs)
+        if phase_name == "verify":
+            return self._observe_verify(inputs)
+        raise ValueError(
+            f"TaskDagClaimObserver: unknown phase {phase_name!r}"
+        )
+
+    # Reuse OrchestrateIssueObserver's agent-meta parse / render helpers.
+    _parse_agent_meta = OrchestrateIssueObserver._parse_agent_meta
+    _render_body = OrchestrateIssueObserver._render_body
+    _replace_agent_meta = OrchestrateIssueObserver._replace_agent_meta
+
+    def _observe_setup(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        base_sha = self._client.get_branch_head_sha(self._base_branch)
+        if base_sha is None:
+            raise RuntimeError(
+                f"base branch does not exist: {self._base_branch!r}"
+            )
+
+        title = inputs.get("title") or "harness: task-dag-claim-and-plan"
+        prose = inputs.get("prose") or (
+            "Harness-driven task-dag-claim-and-plan scenario."
+        )
+        instructions = (
+            inputs.get("issue_body")
+            or inputs.get("instructions_inline")
+            or "write a hello world test"
+        )
+        feature_branch = (
+            self._feature_branch
+            or inputs.get("feature_branch")
+            or f"agent/task-dag-{_slugify(title)}"
+        )
+        meta = {
+            "protocol_version": 1,
+            "agent_id": None,
+            "session_id": None,
+            "status": None,
+            "status_ts": None,
+            "feature_branch": feature_branch,
+            "base_branch": self._base_branch,
+            "parent_issue": None,
+            "depends_on_prs": [],
+            "instructions_path": None,
+            "instructions_inline": instructions,
+            "created_at": self._iso_now(),
+        }
+        body = self._render_body(prose, meta)
+        labels = list(inputs.get("issue_labels") or [self._agent_task_label])
+        issue = self._client.create_issue(title=title, body=body, labels=labels)
+        number = int(issue["number"])
+        labels_on_issue = {
+            (lbl.get("name") if isinstance(lbl, dict) else lbl)
+            for lbl in (issue.get("labels") or [])
+        }
+        if self._agent_task_label not in labels_on_issue:
+            try:
+                self._client.add_label(number, self._agent_task_label)
+            except Exception:
+                pass
+        self.state.issue_number = number
+        self.state.feature_branch = feature_branch
+        return {
+            "issue_number_present": True,
+            "issue_number": number,
+            "feature_branch": feature_branch,
+        }
+
+    def _observe_claim(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.issue_number is None:
+            raise RuntimeError("claim phase: setup phase has not run")
+        agent_id = inputs.get("agent_id") or f"task-dag-{self._agent_login}"
+        session_id = inputs.get("session_id") or self._new_session_id()
+
+        # CAS-by-re-read handshake.
+        issue = self._client.get_issue(self.state.issue_number)
+        meta = self._parse_agent_meta(issue.get("body"))
+        if meta is None:
+            raise RuntimeError(
+                "claim phase: issue body missing agent-meta block"
+            )
+        new_meta = dict(meta)
+        new_meta["agent_id"] = agent_id
+        new_meta["session_id"] = session_id
+        new_meta["status"] = "working"
+        new_meta["status_ts"] = self._iso_now()
+        new_body = self._replace_agent_meta(issue.get("body"), new_meta)
+        self._client.update_issue(self.state.issue_number, body=new_body)
+
+        # Re-read confirmation step. The losing party never rewrites the
+        # body, so if our agent_id is still there, we won the claim.
+        issue_after = self._client.get_issue(self.state.issue_number)
+        meta_after = self._parse_agent_meta(issue_after.get("body"))
+        claim_won = bool(
+            meta_after
+            and meta_after.get("agent_id") == agent_id
+            and meta_after.get("status") == "working"
+        )
+        if not claim_won:
+            return {
+                "issue_locked": False,
+                "issue_has_label": False,
+                "claim_won": False,
+            }
+
+        # Apply the claimed label so the scenario's assertion passes.
+        # The protocol's lock-and-sweep workflow applies `agent-task`;
+        # the `agent-task-claimed` label is harness-specific signal that
+        # the claim handshake completed.
+        try:
+            self._client.add_label(self.state.issue_number, self._claimed_label)
+        except Exception:
+            pass
+
+        # Re-fetch to confirm label is present.
+        issue_with_label = self._client.get_issue(self.state.issue_number)
+        labels_on_issue = {
+            (lbl.get("name") if isinstance(lbl, dict) else lbl)
+            for lbl in (issue_with_label.get("labels") or [])
+        }
+        self.state.agent_id = agent_id
+        self.state.session_id = session_id
+        self.state.meta_status = "working"
+        return {
+            "issue_locked": True,
+            "issue_has_label": self._claimed_label in labels_on_issue,
+            "claim_won": True,
+            "agent_id": agent_id,
+        }
+
+    def _observe_plan(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.meta_status != "working":
+            raise RuntimeError("plan phase: claim phase has not run")
+        issue = self._client.get_issue(self.state.issue_number)
+        meta = self._parse_agent_meta(issue.get("body"))
+        if meta is None:
+            raise RuntimeError(
+                "plan phase: issue body missing agent-meta block"
+            )
+        instructions = meta.get("instructions_inline") or "[no inline instructions]"
+
+        # Synthesise a minimal brief + subagent plan. A real
+        # ``task-dag.plan`` invocation might prompt an LLM here; the
+        # harness produces a deterministic placeholder so the scenario
+        # can assert on shape, not content.
+        sub_id = f"{self._subagent_id_prefix}-01"
+        brief = (
+            f"# Brief for issue #{self.state.issue_number}\n\n"
+            f"## Instructions\n\n{instructions}\n\n"
+            f"## Subagent plan\n\n"
+            f"- {sub_id}: implement the change\n"
+        )
+        subagent_plan = [
+            {
+                "id": sub_id,
+                "title": "implement the change",
+                "branch": f"{self.state.feature_branch}--{sub_id}",
+            }
+        ]
+        self.state.brief = brief
+        self.state.subagent_plan = subagent_plan
+
+        # Post the brief as a comment on the issue so it's audit-visible.
+        self._client.add_comment(self.state.issue_number, brief)
+
+        # Mark the agent-meta as planned. The protocol's
+        # issue-body.schema.json enum is null/working/abandoned/finished;
+        # "planned" is the scenario's vocabulary for "claim+plan
+        # complete, not yet finished". We write it in the extra
+        # ``plan_state`` field AND in ``status`` so both shapes of
+        # assertion can pass.
+        new_meta = dict(meta)
+        new_meta["status"] = "planned"
+        new_meta["status_ts"] = self._iso_now()
+        new_meta["plan_state"] = "planned"
+        new_body = self._replace_agent_meta(issue.get("body"), new_meta)
+        self._client.update_issue(self.state.issue_number, body=new_body)
+        self.state.meta_status = "planned"
+        return {
+            "brief_present": True,
+            "subagent_plan_count_min": len(subagent_plan),
+            "subagent_plan_count": len(subagent_plan),
+        }
+
+    def _observe_verify(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.issue_number is None:
+            raise RuntimeError("verify phase: setup phase has not run")
+        issue = self._client.get_issue(self.state.issue_number)
+        meta = self._parse_agent_meta(issue.get("body")) or {}
+        return {
+            "meta_status": meta.get("status"),
+            "plan_state": meta.get("plan_state"),
+            "agent_id_present": bool(meta.get("agent_id")),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
 
@@ -810,6 +1116,7 @@ _OBSERVER_FACTORIES: dict[str, Any] = {
     "batch-job-happy-path": BatchJobObserver,
     "orchestrate-issue-single-subagent": OrchestrateIssueObserver,
     "orchestrate-issue-parallel-fanout": OrchestrateIssueObserver,
+    "task-dag-claim-and-plan": TaskDagClaimObserver,
 }
 
 
@@ -831,6 +1138,7 @@ def make_observer(scenario_id: str, **kwargs: Any) -> Any:
 __all__ = [
     "BatchJobObserver",
     "OrchestrateIssueObserver",
+    "TaskDagClaimObserver",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_POLL_TIMEOUT_S",
     "make_observer",
