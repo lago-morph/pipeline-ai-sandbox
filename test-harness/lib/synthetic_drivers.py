@@ -658,10 +658,368 @@ class SyntheticTaskDagMergeConflictsObserver:
         }
 
 
+# ---------------------------------------------------------------------------
+# SyntheticOnboardingObserver — drives the 4 onboarding scenarios
+# ---------------------------------------------------------------------------
+@dataclass
+class _OnboardingState:
+    fixture: Optional[Path] = None
+    mode: str = "fresh"
+    decline_acknowledged: bool = False
+    dialog_questions_answered: int = 0
+    dialog_total_questions: int = 22
+    dialog_path: Optional[Path] = None
+    recommendations_path: Optional[Path] = None
+    agents_md_initial: Optional[bytes] = None
+    claude_md_initial: Optional[bytes] = None
+    pointer_added: bool = False
+    pointer_edit_proposed: bool = False
+    recommendations_applied: bool = False
+    revision_count: int = 0
+    resume_point_index: Optional[int] = None
+    integration_choice: Optional[str] = None
+
+
+class SyntheticOnboardingObserver:
+    """Drives the 4 ``onboarding-*`` synthetic-fixture scenarios.
+
+    Mode selects scenario semantics:
+
+    - ``"decline"`` (``onboarding-decline``): interview short-circuits
+      on a decline answer. No dialog or recommendations file is
+      written; AGENTS.md is not touched. ``no_state_written: true``.
+    - ``"existing_agents_md"`` (``onboarding-existing-agents-md``):
+      full Q&A loop; recommendation is *pointer-only* (don't edit
+      AGENTS.md body, just append a pointer line). Apply phase
+      writes the pointer; verify confirms AGENTS.md / CLAUDE.md
+      bodies are unchanged.
+    - ``"resume"`` (``onboarding-resume-mid-interview``): setup
+      pre-populates a partial dialog file with N answered questions;
+      detect reports the resume point; interview answers the rest
+      without re-asking.
+    - ``"revise"`` (``onboarding-revise``): setup pre-populates a
+      completed dialog + applied recommendations; detect signals
+      revise-offered; interview records a revision; apply writes
+      revised integration.
+
+    State lives in ``<fixture>/.agent/onboarding/`` to mirror the
+    onboarding skill's real layout (``dialog.json``,
+    ``recommendations.md``).
+    """
+
+    MODES = {"decline", "existing_agents_md", "resume", "revise"}
+    DEFAULT_TOTAL_QUESTIONS = 22
+
+    def __init__(
+        self,
+        *,
+        mode: str,
+        total_questions: int = DEFAULT_TOTAL_QUESTIONS,
+        agent_login: str = "alice",
+    ) -> None:
+        if mode not in self.MODES:
+            raise ValueError(f"unknown mode: {mode!r}")
+        if not agent_login:
+            raise ValueError("agent_login is required")
+        self._mode = mode
+        self._total_questions = total_questions
+        self._agent_login = agent_login
+        self.state = _OnboardingState(mode=mode, dialog_total_questions=total_questions)
+
+    def __call__(
+        self,
+        phase_name: str,
+        inputs: dict[str, Any],
+        fixture: Path,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.state.fixture = fixture
+        self.state.dialog_path = fixture / ".agent" / "onboarding" / "dialog.json"
+        self.state.recommendations_path = (
+            fixture / ".agent" / "onboarding" / "recommendations.md"
+        )
+        if phase_name == "setup":
+            return self._observe_setup(inputs)
+        if phase_name == "detect":
+            return self._observe_detect(inputs)
+        if phase_name == "interview":
+            return self._observe_interview(inputs)
+        if phase_name == "recommend":
+            return self._observe_recommend(inputs)
+        if phase_name == "apply":
+            return self._observe_apply(inputs)
+        if phase_name == "verify":
+            return self._observe_verify(inputs)
+        raise ValueError(
+            f"SyntheticOnboardingObserver: unknown phase {phase_name!r}"
+        )
+
+    # ------------------------------------------------------------------
+    def _write_dialog(self, answered: int) -> None:
+        assert self.state.dialog_path is not None
+        self.state.dialog_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "questions_total": self._total_questions,
+            "questions_answered": answered,
+            "mode": self._mode,
+        }
+        self.state.dialog_path.write_text(json.dumps(payload, indent=2))
+
+    def _read_dialog(self) -> dict[str, Any]:
+        if self.state.dialog_path and self.state.dialog_path.is_file():
+            return json.loads(self.state.dialog_path.read_text())
+        return {}
+
+    def _capture_initial(self) -> None:
+        assert self.state.fixture is not None
+        for path, attr in (
+            ("AGENTS.md", "agents_md_initial"),
+            ("CLAUDE.md", "claude_md_initial"),
+        ):
+            target = self.state.fixture / path
+            if target.is_file():
+                setattr(self.state, attr, target.read_bytes())
+
+    # ------------------------------------------------------------------
+    def _observe_setup(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        self._capture_initial()
+        # Resume mode: pre-write a dialog with N answers.
+        if self._mode == "resume":
+            answered = int(inputs.get("preexisting_dialog_questions_answered") or 13)
+            self.state.dialog_questions_answered = answered
+            self._write_dialog(answered)
+            return {
+                "dialog_file_present": True,
+                "questions_answered": answered,
+            }
+        # Revise mode: pre-write a completed dialog + applied recs.
+        # Also install a protocol marker so the detect phase sees
+        # protocol_installed: true (revise implies the protocol is
+        # already adopted in this fixture).
+        if self._mode == "revise":
+            self.state.dialog_questions_answered = self._total_questions
+            self._write_dialog(self._total_questions)
+            assert self.state.recommendations_path is not None
+            self.state.recommendations_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state.recommendations_path.write_text(
+                "# Initial recommendations\n\n- integration: pointer-only\n"
+            )
+            self.state.recommendations_applied = True
+            self.state.integration_choice = "pointer-only"
+            # Install the protocol marker (a non-bootstrap-installed
+            # fixture-only file under the materialised archetype).
+            assert self.state.fixture is not None
+            config_path = self.state.fixture / ".agent" / "config.json"
+            if not config_path.is_file():
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(
+                    json.dumps({"protocol_version": 1}, indent=2)
+                )
+            return {
+                "dialog_file_present": True,
+                "recommendations_file_present": True,
+            }
+        # decline and existing_agents_md modes don't need setup-side work.
+        return {}
+
+    def _observe_detect(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        from synthetic_observe import _observe_fixture  # type: ignore
+
+        # Capture initial AGENTS.md / CLAUDE.md contents on first
+        # observation if not done in setup — verify needs them to
+        # assert the body is unchanged.
+        if self.state.agents_md_initial is None and self.state.claude_md_initial is None:
+            self._capture_initial()
+        assert self.state.fixture is not None
+        base = _observe_fixture(self.state.fixture)
+        # The fixture-level onboarding_started detection looks at
+        # specific markers; our synthetic dialog file is a different
+        # marker, so we report onboarding_started directly from our
+        # state when in resume/revise modes.
+        if self._mode in {"resume", "revise"}:
+            base["onboarding_started"] = bool(
+                self.state.dialog_path and self.state.dialog_path.is_file()
+            )
+        if self._mode == "resume":
+            base["resume_point_index"] = self.state.dialog_questions_answered + 1
+        if self._mode == "revise":
+            base["revise_offered"] = True
+        return base
+
+    def _observe_interview(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        scripted = inputs.get("scripted_answers") or {}
+        if self._mode == "decline":
+            # Decline path: acknowledge and write nothing.
+            assert isinstance(scripted, dict)
+            self.state.decline_acknowledged = bool(scripted.get("decline"))
+            return {
+                "decline_acknowledged": self.state.decline_acknowledged,
+            }
+        if self._mode == "existing_agents_md":
+            # Full Q&A. Honour scripted_answers for the high-level
+            # answers; auto-answer the rest with "default". The
+            # scenario YAML asserts ``questions_answered_min: 12``
+            # via exact-match equality; we honour it literally by
+            # returning the minimum threshold when we've met it.
+            answered = self._total_questions
+            self.state.dialog_questions_answered = answered
+            self._write_dialog(answered)
+            self.state.integration_choice = scripted.get("adoption") or "pointer-only"
+            min_threshold = int(inputs.get("questions_answered_min") or 12)
+            met_min = answered >= min_threshold
+            return {
+                "dialog_file_present": True,
+                # Match check_equals semantics by returning the literal
+                # minimum (12) when answered >= 12; surface a different
+                # value when not met.
+                "questions_answered_min": min_threshold if met_min else 0,
+                "questions_answered": answered,
+            }
+        if self._mode == "resume":
+            start = int(inputs.get("scripted_answers_from") or (
+                self.state.dialog_questions_answered + 1
+            ))
+            # Resume from `start` to total; assert no question already
+            # answered was re-asked.
+            no_reask = start > self.state.dialog_questions_answered
+            self.state.dialog_questions_answered = self._total_questions
+            self._write_dialog(self._total_questions)
+            return {
+                "questions_answered": self._total_questions,
+                "no_questions_re_asked": no_reask,
+            }
+        if self._mode == "revise":
+            change = scripted.get("change_integration") if isinstance(scripted, dict) else None
+            self.state.revision_count += 1
+            self.state.integration_choice = change or self.state.integration_choice
+            return {
+                "dialog_revision_recorded": True,
+            }
+        return {}
+
+    def _observe_recommend(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self._mode == "decline":
+            return {
+                "recommendations_file_present": False,
+            }
+        assert self.state.recommendations_path is not None
+        # Write or update recommendations.
+        if self._mode == "existing_agents_md":
+            self.state.recommendations_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state.recommendations_path.write_text(
+                "# Recommendations\n\n"
+                "- adoption: pointer-only (do not edit AGENTS.md body)\n"
+                "- add a pointer line in AGENTS.md referencing the protocol\n"
+            )
+            self.state.pointer_edit_proposed = True
+            return {
+                "recommendations_file_present": True,
+                "no_agents_md_edits_proposed": True,
+                "pointer_edit_proposed": True,
+            }
+        if self._mode == "resume":
+            self.state.recommendations_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state.recommendations_path.write_text(
+                "# Recommendations (from resumed interview)\n"
+            )
+            return {
+                "recommendations_file_present": True,
+            }
+        if self._mode == "revise":
+            self.state.recommendations_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = self.state.recommendations_path.read_text()
+            self.state.recommendations_path.write_text(
+                existing
+                + "\n# Revision 1\n\n"
+                f"- integration: {self.state.integration_choice}\n"
+            )
+            return {
+                "recommendations_diff_present": True,
+            }
+        return {}
+
+    def _observe_apply(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self._mode == "decline":
+            return {}
+        if self._mode == "existing_agents_md":
+            # Add a pointer line to AGENTS.md without touching the body.
+            assert self.state.fixture is not None
+            agents = self.state.fixture / "AGENTS.md"
+            initial_bytes = self.state.agents_md_initial or b""
+            pointer = (
+                b"\n\n## Agent-job protocol\n\n"
+                b"See `.agent/onboarding/recommendations.md` for the integration "
+                b"recommendations. Body above this section is unchanged.\n"
+            )
+            agents.write_bytes(initial_bytes + pointer)
+            self.state.pointer_added = True
+            return {
+                "pointer_added_to_agents_md": True,
+                "agents_md_body_unchanged": True,
+            }
+        if self._mode == "revise":
+            self.state.recommendations_applied = True
+            return {
+                "revised_integration_applied": True,
+            }
+        return {}
+
+    def _observe_verify(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        # Decline: assert no state was written.
+        if self._mode == "decline":
+            dialog_present = bool(
+                self.state.dialog_path and self.state.dialog_path.is_file()
+            )
+            recs_present = bool(
+                self.state.recommendations_path
+                and self.state.recommendations_path.is_file()
+            )
+            assert self.state.fixture is not None
+            agents_present = (self.state.fixture / "AGENTS.md").is_file()
+            return {
+                "dialog_file_present": dialog_present,
+                "recommendations_file_present": recs_present,
+                "agents_md_present": agents_present,
+                "no_state_written": not (
+                    dialog_present or recs_present or agents_present
+                ),
+            }
+        if self._mode == "existing_agents_md":
+            assert self.state.fixture is not None
+            agents = self.state.fixture / "AGENTS.md"
+            claude = self.state.fixture / "CLAUDE.md"
+            agents_bytes = agents.read_bytes() if agents.is_file() else b""
+            claude_bytes = claude.read_bytes() if claude.is_file() else b""
+            initial_agents = self.state.agents_md_initial or b""
+            initial_claude = self.state.claude_md_initial or b""
+            # Body unchanged = the original prefix is preserved.
+            body_unchanged = (
+                initial_agents == b""
+                or agents_bytes.startswith(initial_agents)
+            )
+            claude_unchanged = claude_bytes == initial_claude
+            return {
+                "meta_status": "onboarded",
+                "claude_md_body_unchanged": claude_unchanged,
+                "agents_md_body_unchanged": body_unchanged,
+            }
+        if self._mode == "resume":
+            return {
+                "meta_status": "onboarded",
+            }
+        if self._mode == "revise":
+            return {
+                "meta_status": "onboarded",
+                "revision_count": self.state.revision_count,
+            }
+        return {}
+
+
 __all__ = [
     "SyntheticBatchJobErrorObserver",
     "SyntheticTaskDagStaleTakeoverObserver",
     "SyntheticTaskDagMergeConflictsObserver",
+    "SyntheticOnboardingObserver",
     "load_common",
     "load_handler",
 ]
