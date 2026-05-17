@@ -1,8 +1,14 @@
 # NEW-REPO-PLAN — the maintenance project for the 5 skills
 
-Status: design-stage. Designed for **overnight, unattended, parallel
-execution** by a Claude Code dispatcher in the new
-`pipeline-ai-sandbox` repo.
+Status: **in progress, post-bootstrap**. Phases 0-4, 6, 8, 9 done; Phase
+5 partial (1 of 8 live-target scenarios implemented + unit-tested); Phase
+7 not yet driven. See "Current status" below for the breakdown and
+"What's left" at the end for the remaining backlog.
+
+Originally designed for **overnight, unattended, parallel execution** by
+a Claude Code dispatcher in the new `pipeline-ai-sandbox` repo;
+in practice the dispatcher ran constrained (MCP scope pinned to one
+repo) and most live-target work is still ahead.
 
 Audience: the dispatcher agent that bootstraps and exercises the
 new `pipeline-ai-sandbox` repo after the bundle has been applied.
@@ -10,6 +16,70 @@ new `pipeline-ai-sandbox` repo after the bundle has been applied.
 > Read `OVERVIEW.md`, `SPEC-PACKAGE.md`, and the per-skill SPECs
 > first. This plan assumes the bootstrap (`bootstrap/install.md`)
 > has already laid out the file tree in the new repo.
+
+## Current status (as of 2026-05-17)
+
+| Phase | Status | Evidence |
+|---|---|---|
+| 0 — pre-flight | done | PR #2 (`7adc61f`) |
+| 1 — initial scaffolding | done | PR #2 (`7adc61f`) |
+| 2 — protocol self-install | done | PR #2 (`d254101`) |
+| 3 — archetype verification | done (inlined, not fanout) | PR #2 |
+| 4 — scenario harness + 18 runners | done | PR #2 (`f1ed891`) |
+| 5 — drive scenarios live | **partial — 1/8** | PR #5 (live `batch-job-happy-path`) |
+| 6 — analyze results | done (against partial data) | PR #2 (`runs/Vs1aL/test-results.md`) |
+| 7 — dogfood orchestrate-issue | **not driven** | Issue #1 opened, never executed |
+| 8 — self-retrospective | done | PR #2 + PR #3 (`retrospective/2026-05-16-2.md`) |
+| 9 — commit + open PR | done | PR #2 |
+
+### Work completed beyond the original plan
+
+- **PR #4** — generalised `lock-and-sweep.yml` / `batch-job-handler.yml`
+  / `close-on-merge.yml` from a hardcoded `vars.AGENT_LOGIN` literal to
+  an `author_association`-based gate. Any user with repo write access
+  can now drive the protocol; the personal-login pin is optional
+  (single-bot mode). Codified in `AGENTS.md` §6.
+- **PR #5** — `batch-job-happy-path` is now driveable live via
+  `test-harness/lib/live_observe.BatchJobObserver`, with envelope
+  build/parse helpers (`envelopes.py`), env-driven GitHub client
+  resolution (`github_client_factory.py`), and 144 unit tests covering
+  every lib module (`test-harness/tests/`). CI now runs
+  `pytest test-harness/tests` as part of `test-harness-ci.yml`.
+
+### Phase 5 scenario breakdown by `target`
+
+The 18 scenarios split by YAML-declared `target`:
+
+| Bucket | Count | Scenarios |
+|---|---|---|
+| `synthetic-fixture` (needs in-process mock skill driver) | 10 | `batch-job-parse-error`, `batch-job-runner-pickup-timeout`, `batch-job-branch-sha-mismatch`, `composition-guide-render`, `onboarding-decline`, `onboarding-existing-agents-md`, `onboarding-resume-mid-interview`, `onboarding-revise`, `task-dag-stale-takeover`, `task-dag-merge-conflicts` |
+| `live-new-repo` — done | 1 | `batch-job-happy-path` |
+| `live-new-repo` — runnable here, not yet implemented | 4 | `orchestrate-issue-single-subagent`, `orchestrate-issue-parallel-fanout`, `orchestrate-issue-restart-recovery`, `task-dag-claim-and-plan` |
+| `live-new-repo` — needs a fresh repo (archetype mismatch) | 3 | `onboarding-blank-repo`, `protocol-installed-not-onboarded`, `multi-scenario-soak` |
+
+What actually passes today (from PR #2 retro): **1 fully passing**
+(`composition-guide-render`, which only asserts on fixture state + skill
+markdown), **4 partial** (the `detect` phases of 4 onboarding scenarios
+which read fixture state), **13 fully skipped** with
+`requires-live-skill-execution`. PR #5's live `BatchJobObserver` raises
+the live-driveable count from 0 to 1; the synthetic bucket's
+"skipped → passing" gap is separate work (in-process mock skill driver
+for `task-dag` claim/heartbeat envelope-shape validation,
+`batch-job-handler` parse-error / sha-mismatch / pickup-timeout paths,
+onboarding interview state machine, etc.).
+
+The 4 "runnable here" scenarios coordinate via real GitHub Actions
+workflows and comment threads but don't require a fresh-state archetype
+— they can target this maintenance repo with a small blast radius
+(test issues + branches + PRs flagged via a `scenario:<id>` label).
+
+The 3 archetype-mismatch scenarios assert on absence-of-state that this
+repo doesn't satisfy (`agents_md_present: false`,
+`onboarding_started: false`, etc.). They need either a dispatcher with
+broader MCP scope (so `mcp__github__create_repository` can spin up
+fresh repos) or an explicit ADR adopting "synthetic-fixture is the
+default; `live-new-repo` is opt-in only where the archetype permits"
+to declare them out of scope.
 
 ## Prerequisites
 
@@ -65,6 +135,12 @@ for overnight.
 
 ## Phase 0 — pre-flight
 
+**Status: done** (PR #2). One adjustment to the as-designed flow: the
+repo turned out to live at `lago-morph/pipeline-ai-sandbox`, not under
+the agent-account namespace; `vars.AGENT_LOGIN` was left unset and the
+`author_association` gate (added later in PR #4) covers the
+authorisation model.
+
 Single-thread.
 
 1. Verify on `main` branch initially: `git branch --show-current` returns `main`.
@@ -91,6 +167,10 @@ If anything fails in steps 1-5, abort.
 
 ## Phase 1 — fanout: initial scaffolding
 
+**Status: done** (PR #2). Ran without `isolation: "worktree"` since the
+path partition was obviously safe; the retro lifted this into a general
+rule (suggestion #9).
+
 Four subagents in parallel. Each touches disjoint paths.
 
 | id | scope |
@@ -111,6 +191,14 @@ Each subagent's brief follows the same 9-section pattern as
 Merge in plan order after all 4 complete.
 
 ## Phase 2 — apply protocol install (dogfood self-install)
+
+**Status: done** (PR #2). Two operational mishaps surfaced bugs in the
+original procedure (see retro): `git clean -fdx` mid-flight wiped
+uncommitted `.agent/` copies, and the `agent-task` label could not be
+created agent-side. Both addressed: orphan-branch creation gets a
+dedicated skill spec (`orphan-branch-safe-creation`), and the workflow
+(not the agent) applies the label via the `lock-and-sweep` gate fixed
+in PR #4.
 
 Single-thread.
 
@@ -136,6 +224,11 @@ bug in the skill's install logic. Surface to the run report.
 
 ## Phase 3 — fanout: archetype materialisation
 
+**Status: done, inlined** (PR #2). Each archetype's manifest-vs-disk
+check took ~30ms, so the 8 subagents were inlined into a single pass
+rather than fanned out. All 8 archetypes' manifests matched their
+files exactly.
+
 The 8 archetypes are already in the bootstrap. This phase **verifies**
 each archetype is correctly materialised and adds any
 archetype-specific runtime initialisation (e.g. for the `partial-protocol`
@@ -155,6 +248,13 @@ Eight subagents, two waves of 4.
 | sub-08 | gitlab-only | Same + verify `.gitlab-ci.yml` is present |
 
 ## Phase 4 — fanout: scenario implementation
+
+**Status: done** (PR #2). 18 runners produced from a single 30-line
+generator script + template + per-scenario YAML, instead of the 5 waves
+of subagents originally planned. Caught a `.gitignore` bug
+(`lib/` without leading slash silently excluded `test-harness/lib/`).
+The generator pattern is lifted into a proposed skill spec
+(`runner-template-generation`).
 
 The 18 scenarios from `test-harness/SPEC.md` need executable runners.
 Each scenario's `lib/scenario_runner.py` orchestrates phases per the
@@ -185,6 +285,33 @@ rate, surface to the run report before dispatching wave N+1.
 
 ## Phase 5 — fanout: drive scenarios live
 
+**Status: partial — 1 of 8 live-target scenarios implemented.**
+
+- `batch-job-happy-path` is now fully driveable (PR #5). The
+  `BatchJobObserver` polls the request comment until the
+  `batch-job-handler` workflow stamps a terminal envelope; envelope
+  parsing tolerates trailing prose; 144 unit tests cover the harness lib.
+- The other 4 in-repo-runnable scenarios
+  (`orchestrate-issue-single-subagent`, `…-parallel-fanout`,
+  `…-restart-recovery`, `task-dag-claim-and-plan`) need their own
+  observer classes following the `BatchJobObserver` shape.
+- The 3 archetype-mismatch scenarios (`onboarding-blank-repo`,
+  `protocol-installed-not-onboarded`, `multi-scenario-soak`) need
+  fresh-repo dispatchers and are blocked on either widened MCP scope or
+  an explicit "synthetic-only for these scenarios" ADR.
+
+Live-run driver requirements (now formalised in PR #5):
+
+- `GITHUB_TOKEN` or `GH_TOKEN` in the environment.
+- `GITHUB_REPOSITORY` env var (or a `origin` remote pointing at GitHub).
+- Optional `AGENT_LOGIN` to pin the comment author (covered by
+  `author_association` gate even when unset).
+
+The scenario runner now negotiates target at runtime: when the runner
+exposes a `live_observer_factory` AND credentials resolve, the live
+observer drives the real path; otherwise records `degraded_reason`
+in state diagnostics and falls back to synthetic.
+
 For each implemented scenario, run it. The dispatcher does this in
 **waves of 4** to balance throughput against the new repo's GitHub
 quota (rate limit, Actions minutes).
@@ -208,6 +335,11 @@ Failed scenarios:
 
 ## Phase 6 — analyze results
 
+**Status: done against partial data** (PR #2). The current report at
+`runs/Vs1aL/test-results.md` shows 8% phase-pass-rate (1 full /
+4 partial / 13 skipped); needs re-running once additional live
+observers land (Phase 5 follow-ups).
+
 Single-thread.
 
 1. Read every `harness/runs/<run_id>/<scenario_id>/state.json`.
@@ -217,6 +349,16 @@ Single-thread.
 5. Write `runs/<run_id>/test-results.md` with full summary.
 
 ## Phase 7 — dogfood: run orchestrate-issue end-to-end
+
+**Status: not yet driven.** Issue #1 is open with a real `agent-meta`
+block and substitute payload ("add a `TESTING.md` per archetype").
+The original blocker — believed to be "MCP can't create labels" — was
+diagnosed in PR #2 retro Part 5 as wrong; the workflow's
+`lock-and-sweep.yml` applies the label automatically when the issue
+creator has repo write access. PR #4 generalised that gate so any
+authorised user can drive it. Re-attempting the dogfood is now a
+matter of invoking `orchestrate-issue` against issue #1 from a
+session with `mcp__github__*` tools available.
 
 Single-thread, but the orchestrate-issue invocation itself fans out
 subagents internally.
@@ -236,6 +378,11 @@ This is the most ambitious live test. If it works, the protocol is
 end-to-end validated in its own dev repo.
 
 ## Phase 8 — self-retrospective
+
+**Status: done** (PR #2 first cut at `retrospective/2026-05-15-01.md`;
+canonical version at `retrospective/2026-05-16-2.md` via PR #3, which
+also added sibling specs for 4 proposed skills and 10 proposed
+AGENTS.md additions).
 
 Single-thread. Apply the `self-retrospective` skill pattern.
 
@@ -280,6 +427,9 @@ Bootstrap pipeline-ai-sandbox and validate the 5 distributable skills
    rationale.
 
 ## Phase 9 — commit + open PR
+
+**Status: done** (PR #2 merged; subsequent work landed via PR #3, PR
+#4, PR #5).
 
 Single-thread.
 
@@ -347,6 +497,92 @@ pipeline-ai-sandbox/
 
 And one PR opened against `main` with the run report and
 retrospective.
+
+## What's left to finish implementing and testing
+
+Ordered by leverage. Each item is sized as a separate PR.
+
+### Implementation backlog (Phase 5 completion)
+
+1. **`orchestrate-issue-single-subagent` live observer + tests.** New
+   `OrchestrateIssueObserver` class in `test-harness/lib/live_observe.py`
+   shaped like `BatchJobObserver`: `claim` posts a claim envelope,
+   `fanout` posts subagent dispatch comments, `merge` watches for the
+   feature branch + PR, `verify` asserts `meta_status: shipped`. Unit
+   tests against a scriptable fake client following the
+   `test_live_observe.py` pattern. Reuses `envelopes.py` + adds any
+   orchestrate-specific envelope shapes.
+2. **`task-dag-claim-and-plan` live observer + tests.** Drives
+   `task-dag.claim` and `task-dag.plan` against an `agent-task` issue
+   in this repo. Shares envelope helpers with the orchestrate observer.
+3. **`orchestrate-issue-parallel-fanout` live observer + tests.**
+   Builds on (1) with `max_parallel: N` and assertions on the merge
+   ordering. May share the same observer class as (1) with a different
+   constructor arg.
+4. **`orchestrate-issue-restart-recovery` live observer + tests.**
+   Kill mid-flight and resume from `state.json`. Harder than the
+   others because it interleaves with the runner's own restart logic.
+
+After (1)-(4) land, the live-driveable count moves from 1 to 5 of 18.
+The 10 synthetic scenarios are a separate workstream — they need
+in-process mock skill drivers built on top of `InMemoryGitHubClient`
+(see ".agent/scripts/common.py") rather than live observers. Re-run
+Phase 6 analysis once those land to produce a real
+`runs/<run_id>/test-results.md`.
+
+### Live dogfood (Phase 7)
+
+5. **Drive `orchestrate-issue` against issue #1.** Open question:
+   should this happen as a regular PR-from-an-agent, or as a real
+   `task-dag.claim` round-trip via the workflows? The latter is the
+   stronger dogfood signal. Either way: comment-trail evidence should
+   be committed under `runs/<run_id>/` so the dogfood is auditable.
+
+### Synthetic-bucket completion (separate workstream)
+
+6. **In-process mock skill drivers for the 10 synthetic scenarios.**
+   Each driver invokes the skill's Python entry-points against
+   `InMemoryGitHubClient` rather than real GitHub, then surfaces
+   observations the scenario's `expected` block asserts on. Most
+   scenarios share a small core (envelope schema validation,
+   handler dispatch, parse-error path); the onboarding scenarios
+   share an interview-state-machine driver. ~3-4 PRs depending on
+   how cleanly the drivers cluster.
+
+### Out-of-scope items requiring a decision
+
+7. **3 archetype-mismatch scenarios.** Need either (a) widened MCP
+   scope so the dispatcher can create per-scenario temp repos under
+   the agent's account, OR (b) an explicit ADR adopting "live-new-repo
+   is opt-in only where the archetype permits; everything else is
+   synthetic-only in this repo". The retro lists the ADR; user
+   decision per ADR.
+
+### Codification of lessons (no skill-implementation gating)
+
+8. **Adopt the 10 AGENTS.md suggestions** from
+   `retrospective/2026-05-16-2/AGENTS-suggestions.md`. Partial overlap
+   with existing `AGENTS.md` §6 (GitHub MCP discipline); suggestions
+   1, 2, 3, 5, 6, 7, 9, 10 are not yet absorbed. Mechanical paste
+   work — one PR.
+9. **Author the 4 proposed skill specs as skills.** Specs already exist
+   at `retrospective/2026-05-16-2/*-spec.md`:
+   `vendored-bundle-discipline`, `orphan-branch-safe-creation`,
+   `honest-synthetic-harness`, `runner-template-generation`. Each gets
+   a `.claude/skills/<name>/` directory with `SKILL.md` + any helper
+   scripts.
+10. **Author the 6 proposed ADRs** (titles in
+    `retrospective/2026-05-16-2.md` Part 4). User decides per ADR
+    whether to author.
+
+### Operational documentation
+
+11. **`RUNNING-LOCALLY.md`** documenting how to drive Phase 5 + Phase 7
+    from a local Claude Code CLI on Linux: `gh auth login`,
+    `GITHUB_TOKEN` exposure, MCP server config, and the exact
+    `pytest test-harness/tests` + `python test-harness/runners/<id>.py
+    --target=live-new-repo` invocation. Currently lives only in
+    conversation history.
 
 ## What happens after this plan succeeds
 
