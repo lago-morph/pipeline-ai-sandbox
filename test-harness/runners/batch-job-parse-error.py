@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Runner for the 'batch-job-parse-error' scenario.
 
-See test-harness/scenarios/batch-job-parse-error.yml for the scenario spec and
-test-harness/lib/scenario_runner.py for the generic phase loop. This
-runner uses the synthetic-fixture observer; phases whose assertions
-require live skill execution against real GitHub are marked
-`skipped` with reason 'requires-live-skill-execution'.
+Synthetic-fixture target: drives the real ``handler.run`` function in
+``.agent/scripts/handler.py`` against an in-memory GitHub client (see
+``test-harness/lib/synthetic_drivers.py``). Posts a malformed envelope
+and observes the terminal ``parse_error`` envelope the handler writes
+back.
 """
 from __future__ import annotations
 
@@ -17,26 +17,17 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from scenario_runner import cli_main  # noqa: E402
-from synthetic_observe import generic_observe  # noqa: E402
+from synthetic_drivers import SyntheticBatchJobErrorObserver  # noqa: E402
 
 
 SCENARIO_ID = 'batch-job-parse-error'
 
-# `expected_keys` per phase, used by generic_observe to decide whether
-# any synthetic-mode assertion can be made for a given phase. If none of
-# the phase's expected keys is in the synthetic catalogue, the phase
-# is marked `skipped` rather than `failed`.
-PHASE_EXPECTED_KEYS = {'setup': ['issue_number_present'], 'invoke': ['batch_job_comment_present'], 'verify': ['envelope_run_status', 'error_kind']}
+
+_observer = SyntheticBatchJobErrorObserver(error_mode="parse_error")
 
 
 def observe(phase_name, inputs, fixture, diagnostics):
-    return generic_observe(
-        phase_name,
-        inputs,
-        fixture,
-        diagnostics,
-        expected_keys=PHASE_EXPECTED_KEYS.get(phase_name, []),
-    )
+    return _observer(phase_name, inputs, fixture, diagnostics)
 
 
 if __name__ == "__main__":
