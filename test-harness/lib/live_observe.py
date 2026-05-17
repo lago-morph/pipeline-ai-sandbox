@@ -675,6 +675,7 @@ class OrchestrateIssueObserver:
         all_terminal = completed == max_parallel
         return {
             "subagents_dispatched": max_parallel,
+            "subagent_branches_created": len(self.state.subagent_branches),
             "all_subagents_terminal": all_terminal,
             "request_comment_ids": list(self.state.subagent_request_comment_ids),
             "subagent_branches": list(self.state.subagent_branches),
@@ -766,10 +767,38 @@ class OrchestrateIssueObserver:
                 break
             self._sleep(self._poll_interval_s)
         self.state.pr_merged = pr_merged
+
+        # no_cross_contamination: each sub-branch only modified files
+        # specific to its own sub_id. We check that the stub file
+        # written by sub-NN doesn't appear under any other sub-NN's
+        # sub-branch's commit history (best-effort: read each sub
+        # branch's current files via get_file_contents and ensure the
+        # only `.agent/runs/harness/sub-*.md` file present is its own).
+        no_cross = True
+        for sub_branch in self.state.subagent_branches:
+            sub_id = sub_branch.rsplit("--", 1)[-1]
+            own_path = f".agent/runs/harness/{sub_id}.md"
+            own_content = self._client.get_file_contents(own_path, ref=sub_branch)
+            if own_content is None:
+                no_cross = False
+                continue
+            # Look for other sub_ids' stub files on this branch.
+            for other_branch in self.state.subagent_branches:
+                if other_branch == sub_branch:
+                    continue
+                other_id = other_branch.rsplit("--", 1)[-1]
+                other_path = f".agent/runs/harness/{other_id}.md"
+                if self._client.get_file_contents(other_path, ref=sub_branch) is not None:
+                    no_cross = False
+                    break
+            if not no_cross:
+                break
+
         return {
             "pr_merged": pr_merged,
             "pr_number": self.state.pr_number,
             "meta_status": self.state.meta_status,
+            "no_cross_contamination": no_cross,
         }
 
 
@@ -780,6 +809,7 @@ class OrchestrateIssueObserver:
 _OBSERVER_FACTORIES: dict[str, Any] = {
     "batch-job-happy-path": BatchJobObserver,
     "orchestrate-issue-single-subagent": OrchestrateIssueObserver,
+    "orchestrate-issue-parallel-fanout": OrchestrateIssueObserver,
 }
 
 
