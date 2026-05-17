@@ -12,8 +12,6 @@ Marked with the ``scenario`` pytest marker so CI runs it.
 from __future__ import annotations
 
 import importlib.util
-import json
-import os
 import sys
 import threading
 import time
@@ -107,7 +105,6 @@ def test_batch_job_happy_path_end_to_end(tmp_path, monkeypatch, common):
     # We're going to drive run_scenario manually so we can spin up the
     # fake workflow thread between phases. Import the runner pieces.
     import live_observe
-    import scenario_runner
 
     observer = live_observe.BatchJobObserver(
         github_client=client,
