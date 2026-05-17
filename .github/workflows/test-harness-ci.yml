@@ -236,3 +236,7 @@ jobs:
           for r in runners:
               print(f"  {r}")
           PY
+
+      - name: Unit tests (test-harness/lib + tests)
+        run: |
+          python -m pytest test-harness/tests -ra -q
