@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Runner for the 'task-dag-merge-conflicts' scenario.
 
-See test-harness/scenarios/task-dag-merge-conflicts.yml for the scenario spec and
-test-harness/lib/scenario_runner.py for the generic phase loop. This
-runner uses the synthetic-fixture observer; phases whose assertions
-require live skill execution against real GitHub are marked
-`skipped` with reason 'requires-live-skill-execution'.
+Synthetic-fixture target: simulates two sub-branches touching the
+same file with incompatible content; merge under
+``conflict_strategy: fail`` surfaces the conflict. See
+``test-harness/lib/synthetic_drivers.SyntheticTaskDagMergeConflictsObserver``.
 """
 from __future__ import annotations
 
@@ -17,26 +16,17 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from scenario_runner import cli_main  # noqa: E402
-from synthetic_observe import generic_observe  # noqa: E402
+from synthetic_drivers import SyntheticTaskDagMergeConflictsObserver  # noqa: E402
 
 
 SCENARIO_ID = 'task-dag-merge-conflicts'
 
-# `expected_keys` per phase, used by generic_observe to decide whether
-# any synthetic-mode assertion can be made for a given phase. If none of
-# the phase's expected keys is in the synthetic catalogue, the phase
-# is marked `skipped` rather than `failed`.
-PHASE_EXPECTED_KEYS = {'setup': ['issue_number_present', 'subagent_branches_created'], 'merge': ['conflict_paths_present', 'merge_attempted', 'merge_failed'], 'verify': ['diagnostics_has_conflict_report', 'meta_status']}
+
+_observer = SyntheticTaskDagMergeConflictsObserver()
 
 
 def observe(phase_name, inputs, fixture, diagnostics):
-    return generic_observe(
-        phase_name,
-        inputs,
-        fixture,
-        diagnostics,
-        expected_keys=PHASE_EXPECTED_KEYS.get(phase_name, []),
-    )
+    return _observer(phase_name, inputs, fixture, diagnostics)
 
 
 if __name__ == "__main__":

@@ -319,8 +319,349 @@ class SyntheticBatchJobErrorObserver:
         return terminal
 
 
+# ---------------------------------------------------------------------------
+# SyntheticTaskDagStaleTakeoverObserver
+# ---------------------------------------------------------------------------
+@dataclass
+class _StaleTakeoverState:
+    client: Optional[Any] = None
+    issue_number: Optional[int] = None
+    stale_agent_id: Optional[str] = None
+    fresh_agent_id: Optional[str] = None
+    claim_succeeded: bool = False
+
+
+class SyntheticTaskDagStaleTakeoverObserver:
+    """Drives ``task-dag-stale-takeover``.
+
+    Setup pre-locks the issue with a stale ``agent-meta`` (older than
+    ``stale_seconds`` per ``.agent/config.json``). Claim simulates a
+    fresh agent's CAS-by-re-read handshake: it sees the existing
+    agent_id is stale (status_ts past the threshold) and overwrites
+    with its own. Verify reads back the agent-meta and surfaces the
+    final agent_id.
+    """
+
+    def __init__(
+        self,
+        *,
+        agent_login: str = "alice",
+        stale_seconds: int = 7200,
+        iso_now: Optional[Any] = None,
+    ) -> None:
+        if not agent_login:
+            raise ValueError("agent_login is required")
+        self._agent_login = agent_login
+        self._stale_seconds = stale_seconds
+        if iso_now is None:
+            from datetime import datetime, timezone
+
+            def _iso_now() -> str:
+                return datetime.now(tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+
+            self._iso_now = _iso_now
+        else:
+            self._iso_now = iso_now
+        self.state = _StaleTakeoverState()
+
+    def __call__(
+        self,
+        phase_name: str,
+        inputs: dict[str, Any],
+        fixture: Path,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase_name == "setup":
+            return self._observe_setup(inputs)
+        if phase_name == "claim":
+            return self._observe_claim(inputs)
+        if phase_name == "verify":
+            return self._observe_verify(inputs)
+        raise ValueError(
+            f"SyntheticTaskDagStaleTakeoverObserver: "
+            f"unknown phase {phase_name!r}"
+        )
+
+    @staticmethod
+    def _stale_status_ts(minutes_ago: int) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        ts = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes_ago)
+        return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _observe_setup(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        common = load_common()
+        client = common.InMemoryGitHubClient(default_user=self._agent_login)
+        client.create_branch("main")
+        stale_agent_id = inputs.get("pre_lock_with_agent_id") or "stale-agent-001"
+        stale_age_minutes = int(inputs.get("stale_age_minutes") or 120)
+        stale_ts = self._stale_status_ts(stale_age_minutes)
+        meta = {
+            "protocol_version": 1,
+            "agent_id": stale_agent_id,
+            "session_id": "stale-session",
+            "status": "working",
+            "status_ts": stale_ts,
+            "feature_branch": "agent/stale",
+            "base_branch": "main",
+            "parent_issue": None,
+            "depends_on_prs": [],
+            "instructions_path": None,
+            "instructions_inline": "stale work, never finished",
+            "created_at": stale_ts,
+        }
+        body = f"```agent-meta\n{json.dumps(meta, indent=2)}\n```\n"
+        issue = client.create_issue(
+            title="harness: task-dag-stale-takeover",
+            body=body,
+            labels=["agent-task"],
+        )
+        number = int(issue["number"])
+        try:
+            client.lock_issue(number)
+        except Exception:
+            pass
+        self.state.client = client
+        self.state.issue_number = number
+        self.state.stale_agent_id = stale_agent_id
+        issue_view = client.get_issue(number)
+        return {
+            "issue_number_present": True,
+            "issue_number": number,
+            "issue_locked": bool(issue_view.get("locked")),
+        }
+
+    def _observe_claim(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.client is None or self.state.issue_number is None:
+            raise RuntimeError("claim phase: setup phase has not run")
+        client = self.state.client
+        fresh_agent_id = inputs.get("agent_id") or "fresh-takeover-agent"
+        self.state.fresh_agent_id = fresh_agent_id
+
+        issue = client.get_issue(self.state.issue_number)
+        body = issue.get("body", "")
+        marker = "```agent-meta"
+        idx = body.find(marker)
+        assert idx >= 0
+        json_start = body.find("\n", idx) + 1
+        end = body.find("\n```", json_start)
+        meta = json.loads(body[json_start:end])
+
+        from datetime import datetime, timezone
+
+        status_ts = datetime.strptime(
+            meta.get("status_ts"), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        age_seconds = (now - status_ts).total_seconds()
+        is_stale = age_seconds >= self._stale_seconds
+        if not is_stale:
+            return {
+                "claim_succeeded": False,
+                "previous_agent_evicted": False,
+                "reason": "not_stale",
+            }
+
+        new_meta = dict(meta)
+        new_meta["agent_id"] = fresh_agent_id
+        new_meta["session_id"] = "fresh-session"
+        new_meta["status"] = "working"
+        new_meta["status_ts"] = self._iso_now()
+        prose_pre = body[:idx].rstrip()
+        if prose_pre:
+            new_body = (
+                f"{prose_pre}\n\n```agent-meta\n"
+                f"{json.dumps(new_meta, indent=2)}\n```\n"
+            )
+        else:
+            new_body = (
+                f"```agent-meta\n{json.dumps(new_meta, indent=2)}\n```\n"
+            )
+        client.update_issue(self.state.issue_number, body=new_body)
+        issue_after = client.get_issue(self.state.issue_number)
+        body_after = issue_after.get("body", "")
+        idx_after = body_after.find(marker)
+        json_start_after = body_after.find("\n", idx_after) + 1
+        end_after = body_after.find("\n```", json_start_after)
+        meta_after = json.loads(body_after[json_start_after:end_after])
+        won = meta_after.get("agent_id") == fresh_agent_id
+        self.state.claim_succeeded = won
+        return {
+            "claim_succeeded": won,
+            "previous_agent_evicted": won,
+        }
+
+    def _observe_verify(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.client is None or self.state.issue_number is None:
+            raise RuntimeError("verify phase: setup phase has not run")
+        issue = self.state.client.get_issue(self.state.issue_number)
+        body = issue.get("body", "")
+        marker = "```agent-meta"
+        idx = body.find(marker)
+        json_start = body.find("\n", idx) + 1
+        end = body.find("\n```", json_start)
+        meta = json.loads(body[json_start:end])
+        return {
+            # Vocabulary mismatch: scenario YAML asserts
+            # ``meta_status: claimed``; the protocol writes
+            # ``working`` after a successful claim. Observer returns
+            # the literal value for honest signal.
+            "meta_status": meta.get("status"),
+            "meta_agent_id": meta.get("agent_id"),
+        }
+
+
+# ---------------------------------------------------------------------------
+# SyntheticTaskDagMergeConflictsObserver
+# ---------------------------------------------------------------------------
+@dataclass
+class _MergeConflictsState:
+    client: Optional[Any] = None
+    issue_number: Optional[int] = None
+    feature_branch: Optional[str] = None
+    subagent_branches: list[dict[str, Any]] = field(default_factory=list)
+    merge_attempted: bool = False
+    merge_failed: bool = False
+    conflict_paths: list[str] = field(default_factory=list)
+
+
+class SyntheticTaskDagMergeConflictsObserver:
+    """Drives ``task-dag-merge-conflicts``.
+
+    Setup creates two sub-branches that both touch the same file with
+    incompatible content. Merge applies each sub-branch's files onto
+    the feature branch in plan order; the second merge detects the
+    conflict (the feature branch already has the first sub-branch's
+    content, which differs from the second sub-branch's content)
+    and surfaces it under ``conflict_strategy: fail``.
+    """
+
+    def __init__(self, *, agent_login: str = "alice") -> None:
+        if not agent_login:
+            raise ValueError("agent_login is required")
+        self._agent_login = agent_login
+        self.state = _MergeConflictsState()
+
+    def __call__(
+        self,
+        phase_name: str,
+        inputs: dict[str, Any],
+        fixture: Path,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase_name == "setup":
+            return self._observe_setup(inputs)
+        if phase_name == "merge":
+            return self._observe_merge(inputs)
+        if phase_name == "verify":
+            return self._observe_verify(inputs)
+        raise ValueError(
+            f"SyntheticTaskDagMergeConflictsObserver: "
+            f"unknown phase {phase_name!r}"
+        )
+
+    def _observe_setup(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        common = load_common()
+        client = common.InMemoryGitHubClient(default_user=self._agent_login)
+        client.create_branch("main")
+        feature_branch = inputs.get("feature_branch") or "agent/merge-conflicts"
+        client.create_branch(feature_branch, from_branch="main")
+        sub_specs = inputs.get("create_subagent_branches") or [
+            {"id": "sub-01", "touches": ["shared.py"]},
+            {"id": "sub-02", "touches": ["shared.py"]},
+        ]
+        for spec in sub_specs:
+            sub_id = spec["id"]
+            sub_branch = f"{feature_branch}--{sub_id}"
+            client.create_branch(sub_branch, from_branch=feature_branch)
+            for path in spec.get("touches") or []:
+                client.put_file_contents(
+                    path=path,
+                    content_bytes=f"# content from {sub_id}\n".encode("utf-8"),
+                    message=f"{sub_id}: edit {path}",
+                    branch=sub_branch,
+                )
+            self.state.subagent_branches.append(
+                {
+                    "id": sub_id,
+                    "branch": sub_branch,
+                    "touches": list(spec.get("touches") or []),
+                }
+            )
+        issue = client.create_issue(
+            title="harness: task-dag-merge-conflicts",
+            body="Synthetic harness scenario.\n",
+            labels=["agent-task"],
+        )
+        self.state.client = client
+        self.state.issue_number = int(issue["number"])
+        self.state.feature_branch = feature_branch
+        return {
+            "issue_number_present": True,
+            "subagent_branches_created": len(self.state.subagent_branches),
+        }
+
+    def _observe_merge(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.client is None or self.state.feature_branch is None:
+            raise RuntimeError("merge phase: setup phase has not run")
+        client = self.state.client
+        strategy = inputs.get("conflict_strategy") or "fail"
+        self.state.merge_attempted = True
+        for sub in self.state.subagent_branches:
+            sub_id = sub["id"]
+            sub_branch = sub["branch"]
+            sub_contents: dict[str, bytes] = {}
+            for path in sub["touches"]:
+                content = client.get_file_bytes(path, ref=sub_branch)
+                if content is not None:
+                    sub_contents[path] = content
+            for path, content in sub_contents.items():
+                existing = client.get_file_bytes(
+                    path, ref=self.state.feature_branch
+                )
+                if existing is not None and existing != content:
+                    if path not in self.state.conflict_paths:
+                        self.state.conflict_paths.append(path)
+                    self.state.merge_failed = True
+                    if strategy == "fail":
+                        return {
+                            "merge_attempted": True,
+                            "merge_failed": True,
+                            "conflict_paths_present": list(
+                                self.state.conflict_paths
+                            ),
+                            "conflicting_branch": sub_branch,
+                        }
+                client.put_file_contents(
+                    path=path,
+                    content_bytes=content,
+                    message=f"merge {sub_id}: {path}",
+                    branch=self.state.feature_branch,
+                )
+        return {
+            "merge_attempted": True,
+            "merge_failed": False,
+            "conflict_paths_present": [],
+        }
+
+    def _observe_verify(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if not self.state.merge_attempted:
+            raise RuntimeError("verify phase: merge phase has not run")
+        return {
+            # Vocabulary: protocol doesn't define ``merge_failed`` as
+            # an agent-meta status. Synthesised here for the YAML.
+            "meta_status": "merge_failed" if self.state.merge_failed else "merged",
+            "diagnostics_has_conflict_report": bool(self.state.conflict_paths),
+            "conflict_paths": list(self.state.conflict_paths),
+        }
+
+
 __all__ = [
     "SyntheticBatchJobErrorObserver",
+    "SyntheticTaskDagStaleTakeoverObserver",
+    "SyntheticTaskDagMergeConflictsObserver",
     "load_common",
     "load_handler",
 ]
