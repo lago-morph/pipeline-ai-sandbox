@@ -5,9 +5,13 @@ that, instead of returning synthetic observations from the on-disk
 fixture, drives a real GitHub repo through the scenario's phases and
 returns observations sourced from the live state.
 
-This module implements :class:`BatchJobObserver` for the
-``batch-job-happy-path`` scenario. Subsequent scenarios (orchestrate-
-issue, task-dag, etc.) get their own observer classes here.
+This module implements:
+
+- :class:`BatchJobObserver` for the ``batch-job-happy-path`` scenario.
+- :class:`OrchestrateIssueObserver` for the
+  ``orchestrate-issue-single-subagent`` scenario family (also a
+  building block for the parallel-fanout and restart-recovery
+  variants).
 
 Cross-phase state (issue number, request-comment id, branch / SHA the
 request pointed at) is held on the observer instance and additionally
@@ -16,8 +20,10 @@ restart.
 """
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -48,6 +54,44 @@ class _GitHubClientLike(Protocol):
     def get_comment(self, comment_id: int) -> dict[str, Any]: ...
 
     def get_branch_head_sha(self, branch: str) -> Optional[str]: ...
+
+    # The following operations are only used by OrchestrateIssueObserver;
+    # BatchJobObserver does not call them. They are declared on the
+    # Protocol so static checkers verify both observers against the same
+    # client surface.
+    def get_issue(self, number: int) -> dict[str, Any]: ...
+
+    def update_issue(
+        self,
+        number: int,
+        body: Optional[str] = None,
+        state: Optional[str] = None,
+        labels: Optional[list[str]] = None,
+    ) -> dict[str, Any]: ...
+
+    def create_branch(
+        self,
+        name: str,
+        from_branch: Optional[str] = None,
+    ) -> str: ...
+
+    def put_file_contents(
+        self,
+        path: str,
+        content_bytes: bytes,
+        message: str,
+        branch: str,
+    ) -> dict[str, Any]: ...
+
+    def create_pull_request(
+        self,
+        title: str,
+        head: str,
+        base: str,
+        body: str,
+    ) -> dict[str, Any]: ...
+
+    def get_pull_request(self, number: int) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -264,11 +308,478 @@ class BatchJobObserver:
 
 
 # ---------------------------------------------------------------------------
+# OrchestrateIssueObserver
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _OrchestrateState:
+    """Cross-phase state for one orchestrate-issue scenario run."""
+
+    issue_number: Optional[int] = None
+    base_branch: Optional[str] = None
+    base_sha: Optional[str] = None
+    feature_branch: Optional[str] = None
+    feature_baseline_sha: Optional[str] = None
+    agent_id: Optional[str] = None
+    session_id: Optional[str] = None
+    # One slot per dispatched subagent. Index is the wave-order id.
+    subagent_branches: list[str] = field(default_factory=list)
+    subagent_heads: list[str] = field(default_factory=list)
+    subagent_request_comment_ids: list[int] = field(default_factory=list)
+    subagent_terminal_envelopes: list[Optional[dict[str, Any]]] = field(
+        default_factory=list
+    )
+    pr_number: Optional[int] = None
+    pr_merged: bool = False
+    meta_status: Optional[str] = None
+
+
+def _slugify(value: str, max_len: int = 24) -> str:
+    cleaned = "".join(c.lower() if c.isalnum() else "-" for c in value)
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:max_len] or "issue"
+
+
+class OrchestrateIssueObserver:
+    """Observer for the ``orchestrate-issue-*`` scenario family.
+
+    The observer plays the role of the primary orchestrator agent: it
+    creates an ``agent-task`` issue, claims it, dispatches one or more
+    subagents by posting ``batch-job-request`` envelopes and committing
+    stub work on their sub-branches, merges the sub-branches into the
+    feature branch, opens a PR, and finally waits for the PR to merge
+    while marking the issue's ``agent-meta`` block ``finished``.
+
+    Phases driven (matching the scenario YAML):
+
+    1. ``setup`` — create the issue with an ``agent-meta`` block
+       (``status: null``); create the feature branch from
+       ``base_branch``.
+    2. ``claim`` — update the issue body's ``agent-meta`` block to
+       ``status: working`` under this observer's ``agent_id`` /
+       ``session_id``.
+    3. ``fanout`` — for each of ``max_parallel`` subagent slots, create
+       a sub-branch off the feature tip, commit a stub file, post a
+       ``batch-job-request`` envelope as an issue comment, and poll
+       until the comment is updated to a terminal envelope.
+    4. ``merge`` — in plan order, fast-forward each sub-branch's stub
+       file onto the feature branch (the in-memory equivalent of
+       ``git merge --no-ff``); open a PR from feature into base.
+    5. ``verify`` — write ``status: finished`` to the issue's
+       ``agent-meta`` block, then poll the PR until it is merged
+       externally (in tests, the test helper calls
+       ``merge_pull_request``; in live runs, the user or auto-merge
+       does it).
+
+    The class follows the architecture documented in the
+    ``live-observer-pattern`` skill: scenario-specific knowledge lives
+    in the phase methods; cross-phase data lives on ``self.state``;
+    all timing is via injected ``clock`` + ``sleep``.
+    """
+
+    def __init__(
+        self,
+        *,
+        github_client: _GitHubClientLike,
+        agent_login: str,
+        base_branch: str = "main",
+        feature_branch: Optional[str] = None,
+        max_parallel: int = 1,
+        subagent_command: str = "echo",
+        subagent_id_prefix: str = "sub",
+        agent_task_label: str = "agent-task",
+        poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+        sleep: Optional[Any] = None,
+        clock: Optional[Any] = None,
+        iso_now: Optional[Any] = None,
+        new_session_id: Optional[Any] = None,
+    ) -> None:
+        if not agent_login:
+            raise ValueError("agent_login is required")
+        if max_parallel < 1:
+            raise ValueError("max_parallel must be >= 1")
+        self._client = github_client
+        self._agent_login = agent_login
+        self._base_branch = base_branch
+        self._feature_branch = feature_branch
+        self._max_parallel = max_parallel
+        self._subagent_command = subagent_command
+        self._subagent_id_prefix = subagent_id_prefix
+        self._agent_task_label = agent_task_label
+        self._poll_interval_s = poll_interval_s
+        self._poll_timeout_s = poll_timeout_s
+        self._sleep = sleep or time.sleep
+        self._clock = clock or time.monotonic
+        if iso_now is None:
+            from datetime import datetime, timezone
+
+            def _iso_now() -> str:
+                return datetime.now(tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+
+            self._iso_now = _iso_now
+        else:
+            self._iso_now = iso_now
+        self._new_session_id = new_session_id or (lambda: uuid.uuid4().hex)
+        self.state = _OrchestrateState(base_branch=base_branch)
+
+    # ------------------------------------------------------------------
+    # ObserveFn entry point
+    # ------------------------------------------------------------------
+    def __call__(
+        self,
+        phase_name: str,
+        inputs: dict[str, Any],
+        fixture: Path,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase_name == "setup":
+            return self._observe_setup(inputs)
+        if phase_name == "claim":
+            return self._observe_claim(inputs)
+        if phase_name == "fanout":
+            return self._observe_fanout(inputs)
+        if phase_name == "merge":
+            return self._observe_merge(inputs)
+        if phase_name == "verify":
+            return self._observe_verify(inputs)
+        raise ValueError(
+            f"OrchestrateIssueObserver: unknown phase {phase_name!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # agent-meta helpers (inline copies of .agent/scripts/agent_lib/meta.py
+    # so this module stays import-light)
+    # ------------------------------------------------------------------
+    _AGENT_META_START = "```agent-meta"
+    _AGENT_META_END = "```"
+
+    @classmethod
+    def _parse_agent_meta(cls, body: Optional[str]) -> Optional[dict[str, Any]]:
+        if not body:
+            return None
+        start = body.find(cls._AGENT_META_START)
+        if start < 0:
+            return None
+        json_start = body.find("\n", start)
+        if json_start < 0:
+            return None
+        json_start += 1
+        end = body.find("\n" + cls._AGENT_META_END, json_start)
+        if end < 0:
+            return None
+        try:
+            return json.loads(body[json_start:end])
+        except json.JSONDecodeError:
+            return None
+
+    @classmethod
+    def _render_body(cls, prose: str, meta: dict[str, Any]) -> str:
+        block = f"{cls._AGENT_META_START}\n{json.dumps(meta, indent=2)}\n{cls._AGENT_META_END}"
+        prose = (prose or "").rstrip()
+        if prose:
+            return f"{prose}\n\n{block}\n"
+        return block + "\n"
+
+    @classmethod
+    def _replace_agent_meta(
+        cls,
+        body: Optional[str],
+        new_meta: dict[str, Any],
+    ) -> str:
+        body = body or ""
+        start = body.find(cls._AGENT_META_START)
+        if start < 0:
+            return cls._render_body(body, new_meta)
+        return cls._render_body(body[:start], new_meta)
+
+    # ------------------------------------------------------------------
+    # Phase implementations
+    # ------------------------------------------------------------------
+    def _observe_setup(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        base_sha = self._client.get_branch_head_sha(self._base_branch)
+        if base_sha is None:
+            raise RuntimeError(
+                f"base branch does not exist: {self._base_branch!r}"
+            )
+        self.state.base_sha = base_sha
+
+        title = inputs.get("title") or "harness: orchestrate-issue-single-subagent"
+        prose = inputs.get("prose") or (
+            "Harness-driven orchestrate-issue scenario. "
+            "Will be claimed and fanned out by the harness observer."
+        )
+        instructions = (
+            inputs.get("issue_body")
+            or inputs.get("instructions_inline")
+            or "add a single trivial change"
+        )
+
+        feature_branch = (
+            self._feature_branch
+            or inputs.get("feature_branch")
+            or f"agent/orchestrate-{_slugify(title)}-{self._iso_now()[:10].replace('-', '')}"
+        )
+        meta = {
+            "protocol_version": 1,
+            "agent_id": None,
+            "session_id": None,
+            "status": None,
+            "status_ts": None,
+            "feature_branch": feature_branch,
+            "base_branch": self._base_branch,
+            "parent_issue": None,
+            "depends_on_prs": [],
+            "instructions_path": None,
+            "instructions_inline": instructions,
+            "created_at": self._iso_now(),
+        }
+        body = self._render_body(prose, meta)
+        labels = list(inputs.get("issue_labels") or [self._agent_task_label])
+        issue = self._client.create_issue(title=title, body=body, labels=labels)
+        number = int(issue["number"])
+
+        labels_on_issue = {
+            (lbl.get("name") if isinstance(lbl, dict) else lbl)
+            for lbl in (issue.get("labels") or [])
+        }
+        if self._agent_task_label not in labels_on_issue:
+            try:
+                self._client.add_label(number, self._agent_task_label)
+            except Exception:
+                pass
+
+        # Create the feature branch from base. The orchestrator owns it;
+        # subagents branch from it.
+        feature_head_sha = self._client.create_branch(
+            feature_branch, from_branch=self._base_branch
+        )
+
+        self.state.issue_number = number
+        self.state.feature_branch = feature_branch
+        self.state.feature_baseline_sha = feature_head_sha
+        return {
+            "issue_number_present": True,
+            "issue_number": number,
+            "feature_branch": feature_branch,
+            "feature_baseline_sha": feature_head_sha,
+            "repo_created": True,
+        }
+
+    def _observe_claim(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.issue_number is None:
+            raise RuntimeError("claim phase: setup phase has not run")
+        agent_id = inputs.get("agent_id") or f"orchestrate-{self._agent_login}"
+        session_id = inputs.get("session_id") or self._new_session_id()
+        issue = self._client.get_issue(self.state.issue_number)
+        meta = self._parse_agent_meta(issue.get("body"))
+        if meta is None:
+            raise RuntimeError(
+                "claim phase: issue body missing agent-meta block"
+            )
+        new_meta = dict(meta)
+        new_meta["agent_id"] = agent_id
+        new_meta["session_id"] = session_id
+        new_meta["status"] = "working"
+        new_meta["status_ts"] = self._iso_now()
+        new_body = self._replace_agent_meta(issue.get("body"), new_meta)
+        self._client.update_issue(self.state.issue_number, body=new_body)
+        self.state.agent_id = agent_id
+        self.state.session_id = session_id
+        self.state.meta_status = "working"
+        return {
+            "issue_locked": True,
+            "agent_id": agent_id,
+            "session_id_present": bool(session_id),
+            "meta_status": "working",
+        }
+
+    def _observe_fanout(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.feature_branch is None:
+            raise RuntimeError("fanout phase: setup phase has not run")
+        if self.state.meta_status != "working":
+            raise RuntimeError("fanout phase: claim phase has not run")
+        max_parallel = int(inputs.get("max_parallel") or self._max_parallel)
+        if max_parallel < 1:
+            raise ValueError("max_parallel must be >= 1")
+        command = inputs.get("command") or self._subagent_command
+        args_in = inputs.get("args") or {}
+
+        from envelopes import build_request, parse, serialize, is_terminal
+
+        # Dispatch wave: create sub-branches, commit stub, post envelope.
+        for i in range(max_parallel):
+            sub_id = f"{self._subagent_id_prefix}-{i + 1:02d}"
+            sub_branch = f"{self.state.feature_branch}--{sub_id}"
+            self._client.create_branch(
+                sub_branch, from_branch=self.state.feature_branch
+            )
+            commit_info = self._client.put_file_contents(
+                path=f".agent/runs/harness/{sub_id}.md",
+                content_bytes=(
+                    f"# Harness subagent {sub_id}\n\n"
+                    f"Stub commit for orchestrate-issue scenario.\n"
+                ).encode("utf-8"),
+                message=f"harness: stub commit for {sub_id}",
+                branch=sub_branch,
+            )
+            sub_head_sha = (
+                (commit_info.get("commit") or {}).get("sha")
+                if isinstance(commit_info, dict)
+                else None
+            ) or self._client.get_branch_head_sha(sub_branch)
+            envelope = build_request(
+                command=command,
+                args=dict(args_in),
+                branch=sub_branch,
+                commit_sha=sub_head_sha,
+                subagent_id=sub_id,
+                submitted_at=self._iso_now(),
+            )
+            comment = self._client.add_comment(
+                self.state.issue_number, serialize(envelope)
+            )
+            comment_id = int(comment["id"])
+            self.state.subagent_branches.append(sub_branch)
+            self.state.subagent_heads.append(sub_head_sha)
+            self.state.subagent_request_comment_ids.append(comment_id)
+            self.state.subagent_terminal_envelopes.append(None)
+
+        # Poll each comment to terminal. We use one global deadline
+        # rather than per-comment, matching how the orchestrator would
+        # bound total wave time.
+        deadline = self._clock() + float(self._poll_timeout_s)
+        completed = 0
+        while completed < max_parallel:
+            if self._clock() >= deadline:
+                break
+            advanced = False
+            for idx, cid in enumerate(self.state.subagent_request_comment_ids):
+                if self.state.subagent_terminal_envelopes[idx] is not None:
+                    continue
+                comment = self._client.get_comment(cid)
+                body = comment.get("body") if isinstance(comment, dict) else None
+                parsed = parse(body)
+                if parsed is not None and is_terminal(parsed):
+                    self.state.subagent_terminal_envelopes[idx] = parsed
+                    completed += 1
+                    advanced = True
+            if completed >= max_parallel:
+                break
+            if not advanced:
+                self._sleep(self._poll_interval_s)
+
+        all_terminal = completed == max_parallel
+        return {
+            "subagents_dispatched": max_parallel,
+            "all_subagents_terminal": all_terminal,
+            "request_comment_ids": list(self.state.subagent_request_comment_ids),
+            "subagent_branches": list(self.state.subagent_branches),
+        }
+
+    def _observe_merge(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if not self.state.subagent_branches:
+            raise RuntimeError("merge phase: fanout phase has not run")
+        if self.state.feature_branch is None or self.state.feature_baseline_sha is None:
+            raise RuntimeError("merge phase: feature branch missing")
+
+        # Fast-forward each sub-branch's stub file onto the feature
+        # branch, in plan order. This is the in-process equivalent of
+        # ``git merge --no-ff`` for the test harness; live runs would
+        # use the orchestrator's real git operations.
+        for idx, sub_branch in enumerate(self.state.subagent_branches):
+            sub_id = sub_branch.rsplit("--", 1)[-1]
+            stub_path = f".agent/runs/harness/{sub_id}.md"
+            stub_bytes = (
+                f"# Harness subagent {sub_id}\n\n"
+                f"Stub commit for orchestrate-issue scenario.\n"
+            ).encode("utf-8")
+            self._client.put_file_contents(
+                path=stub_path,
+                content_bytes=stub_bytes,
+                message=f"harness: merge {sub_id} into {self.state.feature_branch}",
+                branch=self.state.feature_branch,
+            )
+
+        feature_head = self._client.get_branch_head_sha(self.state.feature_branch)
+        feature_advanced = (
+            feature_head is not None
+            and feature_head != self.state.feature_baseline_sha
+        )
+
+        title = inputs.get("pr_title") or (
+            f"orchestrate-issue: harness run for issue "
+            f"#{self.state.issue_number}"
+        )
+        body = inputs.get("pr_body") or (
+            f"Harness-driven orchestrate-issue scenario.\n\n"
+            f"Closes #{self.state.issue_number}.\n"
+        )
+        pr = self._client.create_pull_request(
+            title=title,
+            head=self.state.feature_branch,
+            base=self._base_branch,
+            body=body,
+        )
+        pr_number = int(pr["number"])
+        self.state.pr_number = pr_number
+        return {
+            "feature_branch_advanced": feature_advanced,
+            "feature_head_sha": feature_head,
+            "pr_opened": True,
+            "pr_number": pr_number,
+        }
+
+    def _observe_verify(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.state.pr_number is None:
+            raise RuntimeError("verify phase: merge phase has not run")
+        if self.state.issue_number is None:
+            raise RuntimeError("verify phase: setup phase has not run")
+
+        # Write status=finished to the issue's agent-meta block (Phase 9
+        # of the orchestrate-issue skill: finalise the issue before PR
+        # merge so close-on-merge sees the expected post-state).
+        issue = self._client.get_issue(self.state.issue_number)
+        meta = self._parse_agent_meta(issue.get("body"))
+        if meta is not None:
+            new_meta = dict(meta)
+            new_meta["status"] = "finished"
+            new_meta["status_ts"] = self._iso_now()
+            new_body = self._replace_agent_meta(issue.get("body"), new_meta)
+            self._client.update_issue(self.state.issue_number, body=new_body)
+            self.state.meta_status = "finished"
+
+        # Poll the PR until merged. Live runs depend on the user (or
+        # auto-merge) to actually merge the PR; tests use the in-memory
+        # client's merge_pull_request helper to simulate that.
+        deadline = self._clock() + float(self._poll_timeout_s)
+        pr_merged = False
+        while True:
+            if self._clock() >= deadline:
+                break
+            pr = self._client.get_pull_request(self.state.pr_number)
+            if isinstance(pr, dict) and pr.get("merged"):
+                pr_merged = True
+                break
+            self._sleep(self._poll_interval_s)
+        self.state.pr_merged = pr_merged
+        return {
+            "pr_merged": pr_merged,
+            "pr_number": self.state.pr_number,
+            "meta_status": self.state.meta_status,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
 
 _OBSERVER_FACTORIES: dict[str, Any] = {
     "batch-job-happy-path": BatchJobObserver,
+    "orchestrate-issue-single-subagent": OrchestrateIssueObserver,
 }
 
 
@@ -289,6 +800,7 @@ def make_observer(scenario_id: str, **kwargs: Any) -> Any:
 
 __all__ = [
     "BatchJobObserver",
+    "OrchestrateIssueObserver",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_POLL_TIMEOUT_S",
     "make_observer",

@@ -1,7 +1,7 @@
 # NEW-REPO-PLAN — the maintenance project for the 5 skills
 
 Status: **in progress, post-bootstrap**. Phases 0-4, 6, 8, 9 done; Phase
-5 partial (1 of 8 live-target scenarios implemented + unit-tested); Phase
+5 partial (2 of 8 live-target scenarios implemented + unit-tested); Phase
 7 not yet driven. See "Current status" below for the breakdown and
 "What's left" at the end for the remaining backlog.
 
@@ -26,7 +26,7 @@ new `pipeline-ai-sandbox` repo after the bundle has been applied.
 | 2 — protocol self-install | done | PR #2 (`d254101`) |
 | 3 — archetype verification | done (inlined, not fanout) | PR #2 |
 | 4 — scenario harness + 18 runners | done | PR #2 (`f1ed891`) |
-| 5 — drive scenarios live | **partial — 1/8** | PR #5 (live `batch-job-happy-path`) |
+| 5 — drive scenarios live | **partial — 2/8** | PR #5 (live `batch-job-happy-path`) + this PR (live `orchestrate-issue-single-subagent`) |
 | 6 — analyze results | done (against partial data) | PR #2 (`runs/Vs1aL/test-results.md`) |
 | 7 — dogfood orchestrate-issue | **not driven** | Issue #1 opened, never executed |
 | 8 — self-retrospective | done | PR #2 + PR #3 (`retrospective/2026-05-16-2.md`) |
@@ -53,8 +53,8 @@ The 18 scenarios split by YAML-declared `target`:
 | Bucket | Count | Scenarios |
 |---|---|---|
 | `synthetic-fixture` (needs in-process mock skill driver) | 10 | `batch-job-parse-error`, `batch-job-runner-pickup-timeout`, `batch-job-branch-sha-mismatch`, `composition-guide-render`, `onboarding-decline`, `onboarding-existing-agents-md`, `onboarding-resume-mid-interview`, `onboarding-revise`, `task-dag-stale-takeover`, `task-dag-merge-conflicts` |
-| `live-new-repo` — done | 1 | `batch-job-happy-path` |
-| `live-new-repo` — runnable here, not yet implemented | 4 | `orchestrate-issue-single-subagent`, `orchestrate-issue-parallel-fanout`, `orchestrate-issue-restart-recovery`, `task-dag-claim-and-plan` |
+| `live-new-repo` — done | 2 | `batch-job-happy-path`, `orchestrate-issue-single-subagent` |
+| `live-new-repo` — runnable here, not yet implemented | 3 | `orchestrate-issue-parallel-fanout`, `orchestrate-issue-restart-recovery`, `task-dag-claim-and-plan` |
 | `live-new-repo` — needs a fresh repo (archetype mismatch) | 3 | `onboarding-blank-repo`, `protocol-installed-not-onboarded`, `multi-scenario-soak` |
 
 What actually passes today (from PR #2 retro): **1 fully passing**
@@ -285,16 +285,26 @@ rate, surface to the run report before dispatching wave N+1.
 
 ## Phase 5 — fanout: drive scenarios live
 
-**Status: partial — 1 of 8 live-target scenarios implemented.**
+**Status: partial — 2 of 8 live-target scenarios implemented.**
 
 - `batch-job-happy-path` is now fully driveable (PR #5). The
   `BatchJobObserver` polls the request comment until the
   `batch-job-handler` workflow stamps a terminal envelope; envelope
-  parsing tolerates trailing prose; 144 unit tests cover the harness lib.
-- The other 4 in-repo-runnable scenarios
-  (`orchestrate-issue-single-subagent`, `…-parallel-fanout`,
-  `…-restart-recovery`, `task-dag-claim-and-plan`) need their own
-  observer classes following the `BatchJobObserver` shape.
+  parsing tolerates trailing prose.
+- `orchestrate-issue-single-subagent` is now fully driveable (this PR).
+  The `OrchestrateIssueObserver` plays the role of the primary
+  orchestrator: creates an `agent-task` issue with an `agent-meta`
+  block, claims it (sets `status: working`), dispatches subagents by
+  creating sub-branches and posting `batch-job-request` envelopes,
+  fast-forward-merges the sub-branches into the feature branch, opens
+  a PR, writes `status: finished`, and polls until the PR is merged.
+  25 unit tests cover construction, every phase's success + failure
+  modes, the factory, and an end-to-end smoke run.
+- The other 3 in-repo-runnable scenarios (`orchestrate-issue-parallel-fanout`,
+  `orchestrate-issue-restart-recovery`, `task-dag-claim-and-plan`) need
+  their own observer classes following the `BatchJobObserver` /
+  `OrchestrateIssueObserver` shape. The parallel-fanout variant can
+  largely reuse `OrchestrateIssueObserver` with a higher `max_parallel`.
 - The 3 archetype-mismatch scenarios (`onboarding-blank-repo`,
   `protocol-installed-not-onboarded`, `multi-scenario-soak`) need
   fresh-repo dispatchers and are blocked on either widened MCP scope or
@@ -504,26 +514,28 @@ Ordered by leverage. Each item is sized as a separate PR.
 
 ### Implementation backlog (Phase 5 completion)
 
-1. **`orchestrate-issue-single-subagent` live observer + tests.** New
-   `OrchestrateIssueObserver` class in `test-harness/lib/live_observe.py`
-   shaped like `BatchJobObserver`: `claim` posts a claim envelope,
-   `fanout` posts subagent dispatch comments, `merge` watches for the
-   feature branch + PR, `verify` asserts `meta_status: shipped`. Unit
-   tests against a scriptable fake client following the
-   `test_live_observe.py` pattern. Reuses `envelopes.py` + adds any
-   orchestrate-specific envelope shapes.
+1. ~~**`orchestrate-issue-single-subagent` live observer + tests.**~~
+   **Done.** `OrchestrateIssueObserver` in
+   `test-harness/lib/live_observe.py` drives all 5 phases (setup,
+   claim, fanout, merge, verify). 25 unit tests in
+   `test-harness/tests/test_orchestrate_observe.py`. Runner factory
+   wired in `test-harness/runners/orchestrate-issue-single-subagent.py`.
+   The observer's `agent-meta` write uses `status: "finished"` (per the
+   protocol's `issue-body.schema.json` enum); the scenario YAML still
+   expects `meta_status: shipped`, which is a scenario/protocol
+   vocabulary mismatch to resolve upstream in the POC bundle.
 2. **`task-dag-claim-and-plan` live observer + tests.** Drives
    `task-dag.claim` and `task-dag.plan` against an `agent-task` issue
    in this repo. Shares envelope helpers with the orchestrate observer.
 3. **`orchestrate-issue-parallel-fanout` live observer + tests.**
    Builds on (1) with `max_parallel: N` and assertions on the merge
-   ordering. May share the same observer class as (1) with a different
-   constructor arg.
+   ordering. Largely reuses `OrchestrateIssueObserver` with a higher
+   `max_parallel`; the runner factory just constructs it differently.
 4. **`orchestrate-issue-restart-recovery` live observer + tests.**
    Kill mid-flight and resume from `state.json`. Harder than the
    others because it interleaves with the runner's own restart logic.
 
-After (1)-(4) land, the live-driveable count moves from 1 to 5 of 18.
+After (2)-(4) land, the live-driveable count moves from 2 to 5 of 18.
 The 10 synthetic scenarios are a separate workstream — they need
 in-process mock skill drivers built on top of `InMemoryGitHubClient`
 (see ".agent/scripts/common.py") rather than live observers. Re-run
